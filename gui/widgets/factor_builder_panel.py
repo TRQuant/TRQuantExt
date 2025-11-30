@@ -23,6 +23,7 @@ from PyQt6.QtGui import QFont, QColor, QDesktopServices
 import logging
 from pathlib import Path
 from datetime import datetime
+import pandas as pd
 
 from gui.styles.theme import Colors, ButtonStyles
 
@@ -511,7 +512,20 @@ class FactorBuilderPanel(QWidget):
         self.factor_manager = None
         self.jq_client = None
         self.current_results = {}
+        self._init_jq_client()
         self.init_ui()
+    
+    def _init_jq_client(self):
+        """初始化JQData客户端"""
+        try:
+            from jqdata.client import JQDataClient
+            self.jq_client = JQDataClient()
+            if self.jq_client.authenticate():
+                from core.factors import FactorManager
+                self.factor_manager = FactorManager(jq_client=self.jq_client)
+                logger.info("✅ 因子管理器初始化成功")
+        except Exception as e:
+            logger.warning(f"因子管理器初始化失败: {e}")
     
     def init_ui(self):
         """初始化UI"""
@@ -3595,20 +3609,103 @@ sorted_stocks = factor_value.sort_values(
     
     def _on_calculate_factors(self):
         """计算因子"""
+        if self.factor_manager is None:
+            QMessageBox.warning(self, "错误", "因子管理器未初始化，请先连接JQData")
+            return
+        
         selected_items = self.factor_list.selectedItems()
         if not selected_items:
             QMessageBox.warning(self, "提示", "请至少选择一个因子")
             return
         
-        QMessageBox.information(
-            self,
-            "提示",
-            "因子计算需要连接JQData数据源。\n\n"
-            "请在终端运行以下命令测试:\n"
-            "cd /home/taotao/.local/share/trquant\n"
-            "source venv/bin/activate\n"
-            "python test_factors_real.py"
-        )
+        # 获取股票池
+        pool_map = {"沪深300": "000300.XSHG", "中证500": "000905.XSHG", 
+                   "中证1000": "000852.XSHG", "全A股": "all_a"}
+        pool_name = self.stock_pool_combo.currentText()
+        
+        try:
+            import jqdatasdk as jq
+            if pool_name == "全A股":
+                stocks = jq.get_all_securities(types=['stock']).index.tolist()[:500]  # 限制数量
+            else:
+                stocks = jq.get_index_stocks(pool_map[pool_name])
+            
+            # 获取可用日期
+            date = self.jq_client.get_available_date() if self.jq_client else datetime.now().strftime('%Y-%m-%d')
+            
+            # 因子名称映射（从FACTOR_DATABASE到实际因子名）
+            factor_map = {
+                'ep': 'EP', 'bp': 'BP', 'sp': 'SP', 'dividend_yield': 'DividendYield',
+                'roe': 'ROE', 'gross_margin': 'GrossMargin', 'asset_turnover': 'AssetTurnover',
+                'revenue_growth_yoy': 'RevenueGrowth', 'profit_growth_yoy': 'ProfitGrowth',
+                'price_momentum': 'PriceMomentum', 'reversal': 'Reversal',
+                'size': 'Size', 'volatility': 'Volatility', 'turnover': 'Turnover'
+            }
+            
+            # 计算因子
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setValue(0)
+            
+            results = {}
+            factor_names = []
+            for item in selected_items:
+                factor_id = item.data(Qt.ItemDataRole.UserRole)
+                factor_name = factor_map.get(factor_id.lower(), factor_id)
+                if factor_name in self.factor_manager.list_factors():
+                    factor_names.append(factor_name)
+            
+            if not factor_names:
+                QMessageBox.warning(self, "提示", "所选因子在当前因子库中不存在")
+                return
+            
+            # 批量计算
+            total = len(factor_names)
+            for i, name in enumerate(factor_names):
+                self.progress_bar.setValue(int((i + 1) / total * 100))
+                try:
+                    result = self.factor_manager.calculate_factor(name, stocks[:100], date)  # 限制股票数
+                    if result:
+                        results[name] = result
+                except Exception as e:
+                    logger.warning(f"因子计算失败 {name}: {e}")
+            
+            self.progress_bar.setVisible(False)
+            
+            # 显示结果
+            self._display_factor_results(results)
+            
+        except Exception as e:
+            logger.error(f"因子计算失败: {e}")
+            QMessageBox.critical(self, "错误", f"因子计算失败:\n{e}")
+    
+    def _display_factor_results(self, results: dict):
+        """显示因子计算结果"""
+        if not results:
+            return
+        
+        # 构建表格
+        all_stocks = set()
+        for result in results.values():
+            all_stocks.update(result.values.index.tolist())
+        
+        self.result_table.setRowCount(len(all_stocks))
+        self.result_table.setColumnCount(len(results) + 1)
+        
+        headers = ["股票代码"] + list(results.keys())
+        self.result_table.setHorizontalHeaderLabels(headers)
+        
+        for row, stock in enumerate(sorted(all_stocks)):
+            self.result_table.setItem(row, 0, QTableWidgetItem(stock))
+            
+            for col, (name, result) in enumerate(results.items(), 1):
+                value = result.values.get(stock)
+                if pd.notna(value):
+                    item = QTableWidgetItem(f"{value:.4f}")
+                    self.result_table.setItem(row, col, item)
+                else:
+                    self.result_table.setItem(row, col, QTableWidgetItem("-"))
+        
+        self.result_table.resizeColumnsToContents()
     
     def _on_generate_strategy(self):
         """生成策略代码"""

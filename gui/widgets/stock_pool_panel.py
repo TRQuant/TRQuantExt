@@ -758,6 +758,7 @@ class StockPoolPanel(QWidget):
         self.tab_widget.addTab(self._create_tech_tab(), "📈 技术突破")
         self.tab_widget.addTab(self._create_etf_tab(), "💹 ETF轮动")
         self.tab_widget.addTab(self._create_external_tab(), "📋 外部推荐")
+        self.tab_widget.addTab(self._create_factor_filter_tab(), "🔍 因子筛选")
         self.tab_widget.addTab(self._create_signal_tab(), "📤 信号输出")
         
         layout.addWidget(self.tab_widget)
@@ -1445,3 +1446,30 @@ def rebalance(context):
             f.write(code)
         
         QMessageBox.information(self, "完成", f"代码已保存: {filepath}")
+    
+    def _create_factor_filter_tab(self) -> QWidget:
+        """创建因子筛选标签页"""
+        try:
+            from gui.widgets.factor_filter_tab import FactorFilterTab
+            tab = FactorFilterTab()
+            
+            # 尝试获取JQData客户端
+            try:
+                from jqdata.client import JQDataClient
+                jq_client = JQDataClient()
+                if jq_client.authenticate():
+                    tab.set_jq_client(jq_client)
+                    logger.info("✅ 因子筛选标签页已初始化JQData")
+            except Exception as e:
+                logger.warning(f"因子筛选标签页JQData初始化失败: {e}")
+            
+            return tab
+        except Exception as e:
+            logger.error(f"因子筛选标签页加载失败: {e}")
+            widget = QWidget()
+            layout = QVBoxLayout(widget)
+            layout.setContentsMargins(20, 20, 20, 20)
+            error_label = QLabel(f"因子筛选功能加载失败: {e}")
+            error_label.setStyleSheet(f"color: {Colors.ERROR};")
+            layout.addWidget(error_label)
+            return widget
