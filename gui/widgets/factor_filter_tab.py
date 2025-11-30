@@ -65,7 +65,7 @@ Colors = get_colors()
 class CandidatePoolLoader:
     """候选池数据加载器 - 从MongoDB读取"""
     
-    def __init__(self, mongo_uri: str = "mongodb://localhost:27017/", db_name: str = "trquant"):
+    def __init__(self, mongo_uri: str = "mongodb://localhost:27017/", db_name: str = "jqquant"):
         self.mongo_uri = mongo_uri
         self.db_name = db_name
         self.client = None
@@ -95,38 +95,48 @@ class CandidatePoolLoader:
             return []
         
         try:
-            # 尝试从mapped_mainlines集合获取主线及其成分股
-            mainlines = list(self.db.mapped_mainlines.find().sort("composite_score", -1).limit(20))
+            # 从mainline_mapped集合获取最新的主线映射数据
+            latest = self.db.mainline_mapped.find_one(sort=[("timestamp", -1)])
+            
+            if not latest:
+                logger.warning("MongoDB中没有主线映射数据")
+                return []
+            
+            mainlines = latest.get("mainlines", [])
             
             if not mainlines:
                 logger.warning("MongoDB中没有映射的主线数据")
                 return []
             
-            # 收集所有股票
+            # 获取记录的元信息
+            period = latest.get("period", "中期")
+            record_date = latest.get("date", "")
+            
+            logger.info(f"读取主线映射记录: 日期={record_date}, 周期={period}, 主线数={len(mainlines)}")
+            
+            # 收集所有主线信息（稍后获取成分股）
             stocks = []
             for ml in mainlines:
                 mainline_name = ml.get("name", "")
-                jq_code = ml.get("jq_concept_code") or ml.get("jq_industry_code")
-                score = ml.get("composite_score", 0)
+                # composite_tab保存的字段是jqdata_code
+                jq_code = ml.get("jqdata_code")
+                jq_type = ml.get("jqdata_type", "concept")  # concept 或 industry
+                score = ml.get("total_score", 0) or ml.get("composite_score", 0)
                 
-                # 如果有成分股列表
-                if "stocks" in ml:
-                    for stock in ml["stocks"]:
-                        stocks.append({
-                            "code": stock.get("code", ""),
-                            "name": stock.get("name", ""),
-                            "mainline": mainline_name,
-                            "mainline_score": score,
-                            "jq_code": jq_code
-                        })
-                else:
-                    # 只记录主线信息，稍后获取成分股
-                    stocks.append({
-                        "mainline": mainline_name,
-                        "mainline_score": score,
-                        "jq_code": jq_code,
-                        "need_fetch_stocks": True
-                    })
+                if not ml.get("jqdata_mapped"):
+                    logger.debug(f"跳过未映射主线: {mainline_name}")
+                    continue
+                
+                # 记录主线信息，需要通过JQData获取成分股
+                stocks.append({
+                    "mainline": mainline_name,
+                    "mainline_score": score,
+                    "jq_code": jq_code,
+                    "jq_type": jq_type,  # concept 或 industry
+                    "need_fetch_stocks": True,
+                    "record_date": record_date,
+                    "period": period
+                })
             
             logger.info(f"从MongoDB加载候选池: {len(stocks)}条记录, {len(mainlines)}个主线")
             return stocks
@@ -140,7 +150,11 @@ class CandidatePoolLoader:
         if not self._connected:
             return 0
         try:
-            return self.db.mapped_mainlines.count_documents({})
+            # 检查mainline_mapped集合中最新记录的主线数量
+            latest = self.db.mainline_mapped.find_one(sort=[("timestamp", -1)])
+            if latest:
+                return len(latest.get("mainlines", []))
+            return 0
         except:
             return 0
 
@@ -188,16 +202,28 @@ class FactorFilterWorker(QThread):
             # 批量获取成分股
             self.progress.emit(20, f"获取 {len(jq_codes)} 个主线的成分股...")
             
+            # 构建code -> type映射
+            code_type_map = {}
+            for ml in self.mainlines:
+                jq_code = ml.get("jq_code")
+                jq_type = ml.get("jq_type", "concept")
+                if jq_code:
+                    code_type_map[jq_code] = jq_type
+            
             stocks_by_mainline = {}
             for i, jq_code in enumerate(jq_codes):
                 try:
-                    if jq_code.startswith('SC'):  # 概念
-                        stocks = jq.get_concept_stocks(jq_code, date=available_date)
-                    else:  # 行业
+                    jq_type = code_type_map.get(jq_code, "concept")
+                    if jq_type == "industry" or not jq_code.startswith('SC'):
+                        # 行业
                         stocks = jq.get_industry_stocks(jq_code, date=available_date)
+                    else:
+                        # 概念
+                        stocks = jq.get_concept_stocks(jq_code, date=available_date)
                     
                     if stocks:
                         stocks_by_mainline[jq_code] = stocks[:20]  # 每个主线最多20只
+                        logger.info(f"✅ 获取成分股成功: {jq_code} ({jq_type}), 共{len(stocks)}只")
                 except Exception as e:
                     logger.warning(f"获取成分股失败 {jq_code}: {e}")
                 
