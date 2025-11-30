@@ -47,6 +47,35 @@ except PermissionError:
 
 logger = logging.getLogger(__name__)
 
+# 导入版本号（延迟导入，避免循环依赖）
+def get_app_version():
+    """获取应用版本号"""
+    try:
+        from core.version import get_version
+        return get_version()
+    except:
+        return "2.0.0"
+
+
+# 导入版本号（延迟导入，避免循环依赖）
+def get_app_version():
+    """获取应用版本号"""
+    try:
+        from core.version import get_version
+        return get_version()
+    except:
+        return "2.0.0"
+
+# 导入版本号（延迟导入，避免循环依赖）
+def get_app_version():
+    """获取应用版本号"""
+    try:
+        from core.version import get_version
+        return get_version()
+    except:
+        return "2.0.0"
+
+
 
 # ============================================================
 # 启动模式配置

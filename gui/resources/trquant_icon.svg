@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="256" height="256" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- 主渐变 - 蓝紫色科技感 -->
+    <linearGradient id="mainGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#667eea"/>
+      <stop offset="50%" style="stop-color:#764ba2"/>
+      <stop offset="100%" style="stop-color:#f093fb"/>
+    </linearGradient>
+    <!-- 发光效果 -->
+    <linearGradient id="glowGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#00f2fe"/>
+      <stop offset="100%" style="stop-color:#4facfe"/>
+    </linearGradient>
+    <!-- 背景渐变 -->
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a3a"/>
+      <stop offset="100%" style="stop-color:#0f0f2a"/>
+    </linearGradient>
+    <!-- 阴影效果 -->
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+  
+  <!-- 背景圆角矩形 -->
+  <rect x="2" y="2" width="44" height="44" rx="12" fill="url(#bgGradient)" stroke="url(#mainGradient)" stroke-width="1.5"/>
+  
+  <!-- 量化曲线 - K线图抽象 -->
+  <g transform="translate(8, 12)">
+    <!-- 上升趋势线 -->
+    <path d="M4 24 L10 18 L16 20 L22 12 L28 8" 
+          stroke="url(#glowGradient)" 
+          stroke-width="2.5" 
+          stroke-linecap="round" 
+          stroke-linejoin="round"
+          fill="none"
+          filter="url(#glow)"/>
+    
+    <!-- K线柱状图 -->
+    <rect x="3" y="18" width="3" height="8" rx="1" fill="#a6e3a1" opacity="0.9"/>
+    <rect x="9" y="14" width="3" height="10" rx="1" fill="#a6e3a1" opacity="0.9"/>
+    <rect x="15" y="16" width="3" height="8" rx="1" fill="#f38ba8" opacity="0.9"/>
+    <rect x="21" y="10" width="3" height="12" rx="1" fill="#a6e3a1" opacity="0.9"/>
+    <rect x="27" y="6" width="3" height="14" rx="1" fill="#a6e3a1" opacity="0.9"/>
+  </g>
+  
+  <!-- T字母 - 代表韬睿 -->
+  <text x="24" y="38" 
+        font-family="Arial Black, sans-serif" 
+        font-size="12" 
+        font-weight="900"
+        fill="url(#mainGradient)" 
+        text-anchor="middle">
+    TR
+  </text>
+</svg>
+
