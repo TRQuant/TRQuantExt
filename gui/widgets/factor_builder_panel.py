@@ -516,16 +516,39 @@ class FactorBuilderPanel(QWidget):
         self.init_ui()
     
     def _init_jq_client(self):
-        """初始化JQData客户端"""
+        """初始化JQData客户端（从配置文件读取账号）"""
         try:
             from jqdata.client import JQDataClient
+            from config.config_manager import get_config_manager
+            
+            # 从配置文件读取账号密码
+            config_manager = get_config_manager()
+            config = config_manager.get_jqdata_config()
+            
+            username = config.get('username', '')
+            password = config.get('password', '')
+            
+            if not username or not password:
+                logger.warning("未找到JQData配置，请先配置 config/jqdata_config.json")
+                return
+            
             self.jq_client = JQDataClient()
-            if self.jq_client.authenticate():
+            if self.jq_client.authenticate(username, password):
+                # 显示权限信息
+                perm = self.jq_client.get_permission()
+                if perm:
+                    mode = "实时模式" if perm.is_realtime else "历史模式"
+                    logger.info(f"✅ JQData已连接: {mode} ({perm.start_date} 至 {perm.end_date})")
+                
                 from core.factors import FactorManager
                 self.factor_manager = FactorManager(jq_client=self.jq_client)
                 logger.info("✅ 因子管理器初始化成功")
+            else:
+                logger.warning("JQData认证失败")
         except Exception as e:
             logger.warning(f"因子管理器初始化失败: {e}")
+            import traceback
+            traceback.print_exc()
     
     def init_ui(self):
         """初始化UI"""

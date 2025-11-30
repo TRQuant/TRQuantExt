@@ -183,12 +183,28 @@ class FactorFilterWorker(QThread):
             mainline_names = list(set(m.get("mainline", "") for m in self.mainlines if m.get("mainline")))
             self.mainline_info.emit(f"已加载 {len(mainline_names)} 个主线: {', '.join(mainline_names[:5])}...")
             
-            self.progress.emit(10, "获取成分股...")
+            self.progress.emit(10, "获取JQData权限范围...")
             
-            # 获取可用日期
-            available_date = self.jq_client.get_available_date() if hasattr(self.jq_client, 'get_available_date') else None
+            # 获取JQData权限范围内的可用日期（关键修复！）
+            available_date = None
+            try:
+                if hasattr(self.jq_client, 'get_permission'):
+                    perm = self.jq_client.get_permission()
+                    if perm and hasattr(perm, 'end_date'):
+                        available_date = perm.end_date
+                        self.progress.emit(12, f"JQData权限范围: {perm.start_date} 至 {perm.end_date}")
+                elif hasattr(self.jq_client, 'get_available_date'):
+                    available_date = self.jq_client.get_available_date()
+            except Exception as e:
+                logger.warning(f"获取JQData权限失败: {e}")
+            
+            # 如果仍然无法获取，使用JQData试用账户的已知范围
             if not available_date:
-                available_date = datetime.now().strftime('%Y-%m-%d')
+                # JQData试用账户通常是3个月前一年的数据
+                available_date = "2025-08-29"  # 已知的试用账户截止日期
+                self.progress.emit(12, f"使用默认日期: {available_date}")
+            
+            logger.info(f"使用日期获取成分股: {available_date}")
             
             # 收集所有股票
             all_stocks = []
@@ -518,6 +534,27 @@ class FactorFilterTab(QWidget):
         self.filter_btn.clicked.connect(self._start_filter)
         btn_layout.addWidget(self.filter_btn)
         
+        # AI智能分析按钮
+        self.ai_btn = QPushButton("🤖 AI智能分析")
+        self.ai_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.SUCCESS};
+                color: white;
+                padding: 12px 24px;
+                border-radius: 8px;
+                font-weight: bold;
+                font-size: 14px;
+            }}
+            QPushButton:hover {{ background-color: #45a049; }}
+            QPushButton:disabled {{
+                background-color: {Colors.BG_TERTIARY};
+                color: {Colors.TEXT_MUTED};
+            }}
+        """)
+        self.ai_btn.clicked.connect(self._start_ai_analysis)
+        self.ai_btn.setEnabled(False)  # 初始禁用，筛选完成后启用
+        btn_layout.addWidget(self.ai_btn)
+        
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
         
@@ -713,6 +750,7 @@ class FactorFilterTab(QWidget):
         self._update_table(signals)
         
         self.filter_btn.setEnabled(True)
+        self.ai_btn.setEnabled(len(signals) > 0)  # 有结果时启用AI分析
         self.progress.setVisible(False)
         self.status_label.setText(f"✅ 筛选完成，共 {len(signals)} 只股票")
     
@@ -768,3 +806,145 @@ class FactorFilterTab(QWidget):
                 self.table.setItem(row, 6, QTableWidgetItem("-"))
         
         self.table.resizeColumnsToContents()
+    
+    def _start_ai_analysis(self):
+        """启动AI智能分析"""
+        if not self.current_signals:
+            QMessageBox.warning(self, "提示", "请先进行因子筛选")
+            return
+        
+        try:
+            from core.ai_analyzer import create_ai_analyzer
+            
+            # 获取主线数据
+            mainlines = self.pool_loader.load_candidate_stocks()
+            
+            # 准备因子评分数据
+            factor_scores = []
+            for signal in self.current_signals:
+                if hasattr(signal, 'code'):
+                    factor_scores.append({
+                        'code': signal.code,
+                        'name': signal.name or signal.code,
+                        'factor_score': signal.factor_score if hasattr(signal, 'factor_score') else 0,
+                        'mainline': signal.mainline if hasattr(signal, 'mainline') else ''
+                    })
+                else:
+                    factor_scores.append(signal)
+            
+            # 获取投资周期
+            period_map = {0: "short", 1: "medium", 2: "long"}
+            period = period_map.get(self.period_combo.currentIndex(), "medium")
+            
+            self.status_label.setText("🤖 正在进行AI智能分析...")
+            self.ai_btn.setEnabled(False)
+            
+            # 创建分析器并执行分析
+            analyzer = create_ai_analyzer(model_type="local")
+            result = analyzer.analyze_stocks(
+                mainlines=mainlines,
+                factor_scores=factor_scores,
+                period=period
+            )
+            
+            # 显示分析结果
+            self._show_ai_result(result)
+            
+            self.ai_btn.setEnabled(True)
+            self.status_label.setText("✅ AI分析完成")
+            
+        except Exception as e:
+            logger.error(f"AI分析失败: {e}")
+            import traceback
+            traceback.print_exc()
+            self.ai_btn.setEnabled(True)
+            self.status_label.setText(f"❌ AI分析失败: {e}")
+            QMessageBox.warning(self, "AI分析失败", str(e))
+    
+    def _show_ai_result(self, result):
+        """显示AI分析结果"""
+        from PyQt6.QtWidgets import QDialog, QTextEdit
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("🤖 AI智能分析结果")
+        dialog.setMinimumSize(600, 500)
+        dialog.setStyleSheet(f"""
+            QDialog {{
+                background-color: {Colors.BG_PRIMARY};
+            }}
+        """)
+        
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        # 摘要
+        summary_label = QLabel(f"📌 {result.summary}")
+        summary_label.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {Colors.PRIMARY};")
+        summary_label.setWordWrap(True)
+        layout.addWidget(summary_label)
+        
+        # 置信度
+        confidence_label = QLabel(f"置信度: {result.confidence:.0%}")
+        confidence_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
+        layout.addWidget(confidence_label)
+        
+        # 推荐股票
+        if result.recommendations:
+            rec_label = QLabel("🎯 推荐股票:")
+            rec_label.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {Colors.SUCCESS}; margin-top: 10px;")
+            layout.addWidget(rec_label)
+            
+            for rec in result.recommendations:
+                rec_text = f"  • {rec.get('code', '')} {rec.get('name', '')} - {rec.get('reason', '')}"
+                rec_item = QLabel(rec_text)
+                rec_item.setStyleSheet(f"color: {Colors.TEXT_PRIMARY};")
+                rec_item.setWordWrap(True)
+                layout.addWidget(rec_item)
+        
+        # 市场观点
+        view_label = QLabel(f"\n📊 市场观点: {result.market_view}")
+        view_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY};")
+        view_label.setWordWrap(True)
+        layout.addWidget(view_label)
+        
+        # 风险评估
+        risk_label = QLabel(f"\n⚠️ 风险评估: {result.risk_assessment}")
+        risk_label.setStyleSheet(f"color: {Colors.WARNING};")
+        risk_label.setWordWrap(True)
+        layout.addWidget(risk_label)
+        
+        # 详细推理
+        reasoning_label = QLabel("\n📝 分析过程:")
+        reasoning_label.setStyleSheet(f"font-size: 12px; color: {Colors.TEXT_MUTED};")
+        layout.addWidget(reasoning_label)
+        
+        reasoning_text = QTextEdit()
+        reasoning_text.setPlainText(result.reasoning)
+        reasoning_text.setReadOnly(True)
+        reasoning_text.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: {Colors.BG_SECONDARY};
+                border: 1px solid {Colors.BORDER_PRIMARY};
+                border-radius: 6px;
+                color: {Colors.TEXT_SECONDARY};
+                font-size: 12px;
+            }}
+        """)
+        reasoning_text.setMaximumHeight(150)
+        layout.addWidget(reasoning_text)
+        
+        # 关闭按钮
+        close_btn = QPushButton("关闭")
+        close_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.BG_TERTIARY};
+                color: {Colors.TEXT_PRIMARY};
+                padding: 10px 20px;
+                border-radius: 6px;
+            }}
+            QPushButton:hover {{ background-color: {Colors.PRIMARY}; }}
+        """)
+        close_btn.clicked.connect(dialog.close)
+        layout.addWidget(close_btn)
+        
+        dialog.exec()
