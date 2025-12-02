@@ -738,30 +738,179 @@ class StockPoolPanel(QWidget):
         super().__init__(parent)
         self.workers = {}
         self._all_stocks = []
+        self._cached_results = {}  # 缓存扫描结果
         self._init_ui()
+        
+        # 立即加载缓存
+        self._load_cached_results()
     
     def _init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         
+        # Tab控件直接在最上面
         self.tab_widget = QTabWidget()
         self.tab_widget.setStyleSheet(f"""
-            QTabWidget::pane {{ border: none; background: {Colors.BG_PRIMARY}; }}
-            QTabBar::tab {{ background: {Colors.BG_SECONDARY}; color: {Colors.TEXT_SECONDARY}; padding: 10px 20px; border: none; border-bottom: 2px solid transparent; }}
-            QTabBar::tab:selected {{ background: {Colors.BG_PRIMARY}; color: {Colors.TEXT_PRIMARY}; border-bottom: 2px solid {Colors.PRIMARY}; }}
-            QTabBar::tab:hover {{ color: {Colors.TEXT_PRIMARY}; }}
+            QTabWidget::pane {{ border: none; background: {Colors.BG_SECONDARY}; }}
+            QTabBar {{ background-color: {Colors.BG_PRIMARY}; }}
+            QTabBar::tab {{ background: {Colors.BG_PRIMARY}; color: {Colors.TEXT_MUTED}; padding: 12px 20px; font-size: 13px; font-weight: 600; border: none; }}
+            QTabBar::tab:selected {{ background: {Colors.BG_SECONDARY}; color: {Colors.MODULE_POOL_START}; border-bottom: 3px solid {Colors.MODULE_POOL_START}; }}
+            QTabBar::tab:hover:!selected {{ background: {Colors.BG_TERTIARY}; color: {Colors.TEXT_PRIMARY}; }}
         """)
         
         self.tab_widget.addTab(self._create_overview_tab(), "📊 综合总览")
         self.tab_widget.addTab(self._create_mainline_tab(), "🔥 主线强势")
+        self.tab_widget.addTab(self._create_strong_stock_tab(), "🚀 强势扫描")
         self.tab_widget.addTab(self._create_tech_tab(), "📈 技术突破")
         self.tab_widget.addTab(self._create_etf_tab(), "💹 ETF轮动")
-        self.tab_widget.addTab(self._create_external_tab(), "📋 外部推荐")
+        self.tab_widget.addTab(self._create_external_tab(), "📋 导入导出")
+        self.tab_widget.addTab(self._create_version_tab(), "📁 版本管理")
         self.tab_widget.addTab(self._create_signal_tab(), "📤 信号输出")
         # 因子筛选已移至"因子构建"面板
         
         layout.addWidget(self.tab_widget)
+    
+    def _load_cached_results(self):
+        """加载缓存的扫描结果"""
+        try:
+            from core.cache_manager import get_cache_manager
+            
+            cache_mgr = get_cache_manager()
+            
+            # 检查候选池缓存
+            if cache_mgr.is_cache_valid('candidate_pool'):
+                cached = cache_mgr.load_cache('candidate_pool')
+                if cached:
+                    stocks = cached.get('stocks', [])
+                    if stocks:
+                        self._all_stocks = stocks
+                        self._cached_results = cached
+                        
+                        # 更新表格显示
+                        if hasattr(self, 'overview_table'):
+                            self._fill_stock_table(self.overview_table, stocks[:50])
+                        
+                        # 更新统计卡片
+                        mainline_count = sum(1 for s in stocks if s.get('source') == 'mainline')
+                        tech_count = sum(1 for s in stocks if s.get('source') == 'tech_breakout')
+                        etf_count = sum(1 for s in stocks if s.get('source') == 'etf')
+                        external_count = sum(1 for s in stocks if s.get('source') == 'external')
+                        
+                        if hasattr(self, 'stat_mainline'):
+                            self._update_stat(self.stat_mainline, mainline_count)
+                        if hasattr(self, 'stat_tech'):
+                            self._update_stat(self.stat_tech, tech_count)
+                        if hasattr(self, 'stat_etf'):
+                            self._update_stat(self.stat_etf, etf_count)
+                        if hasattr(self, 'stat_external'):
+                            self._update_stat(self.stat_external, external_count)
+                        
+                        timestamp = cached.get('timestamp', '')[:16]
+                        period = cached.get('period', '')
+                        logger.info(f"✅ 候选池加载缓存: {len(stocks)}只股票, {timestamp}")
+                        
+                        # 更新状态显示
+                        if hasattr(self, 'overview_status'):
+                            self.overview_status.setText(f"📂 已加载缓存 ({timestamp} {period})")
+                        return
+            
+            # 无有效缓存
+            logger.info("ℹ️ 候选池无有效缓存或已过期")
+            
+        except Exception as e:
+            logger.error(f"❌ 加载候选池缓存失败: {e}", exc_info=True)
+    
+    def _save_scan_results(self, stocks: list, period: str = "medium"):
+        """保存扫描结果到缓存和时间维度快照"""
+        logger.info(f"💾 正在保存候选池缓存: {len(stocks)} 只股票")
+        try:
+            from core.cache_manager import get_cache_manager
+            
+            # 确保数据可序列化 (移除numpy类型等)
+            import json
+            def make_serializable(obj):
+                if hasattr(obj, 'item'):  # numpy types
+                    return obj.item()
+                if isinstance(obj, dict):
+                    return {k: make_serializable(v) for k, v in obj.items()}
+                if isinstance(obj, list):
+                    return [make_serializable(v) for v in obj]
+                return obj
+            
+            clean_stocks = make_serializable(stocks)
+            
+            # 1. 保存到缓存（快速访问）
+            cache_mgr = get_cache_manager()
+            cache_mgr.save_cache('candidate_pool', {
+                'stocks': clean_stocks,
+                'count': len(clean_stocks),
+            }, {'period': period})
+            
+            # 2. 保存到时间维度快照（历史追溯）
+            self._save_time_dimension_snapshot(clean_stocks, period)
+            
+        except Exception as e:
+            logger.error(f"❌ 保存候选池缓存失败: {e}", exc_info=True)
+    
+    def _save_time_dimension_snapshot(self, stocks: list, period: str = "medium"):
+        """保存时间维度快照"""
+        try:
+            from core.time_dimension_manager import create_time_dimension_manager, Period
+            
+            # 映射周期
+            period_map = {"short": Period.SHORT, "medium": Period.MEDIUM, "long": Period.LONG}
+            p = period_map.get(period, Period.MEDIUM)
+            
+            # 获取使用的主线信息
+            mainlines_used = []
+            try:
+                from core.mainline_mapper import MainlineMapper
+                mapper = MainlineMapper()
+                mainlines = mapper.load_mapped_mainlines_from_db()
+                mainlines_used = mainlines if mainlines else []
+            except:
+                pass
+            
+            # 获取数据权限信息
+            data_permission = {}
+            if hasattr(self, 'jq_client') and self.jq_client:
+                try:
+                    perm = self.jq_client.get_permission()
+                    if perm:
+                        data_permission = {
+                            "mode": "historical" if perm.is_historical else "realtime",
+                            "start_date": str(perm.start_date),
+                            "end_date": str(perm.end_date)
+                        }
+                except:
+                    pass
+            else:
+                # 尝试从数据层获取权限信息
+                try:
+                    from markets.ashare.stock_pool.data_layer import StockPoolDataLayer
+                    data_layer = StockPoolDataLayer()
+                    perm_info = data_layer.get_permission_info()
+                    if perm_info:
+                        data_permission = perm_info
+                except:
+                    pass
+            
+            # 保存快照
+            tdm = create_time_dimension_manager()
+            success = tdm.save_candidate_pool_snapshot(
+                stocks=stocks,
+                mainlines_used=mainlines_used,
+                period=p,
+                data_permission=data_permission,
+                source="jqdata"
+            )
+            
+            if success:
+                logger.info(f"✅ 时间维度快照已保存: {len(stocks)} 只股票, 周期={period}")
+            
+        except Exception as e:
+            logger.warning(f"保存时间维度快照失败: {e}")
     
     def _create_stock_table(self, columns: List[str] = None) -> QTableWidget:
         if columns is None:
@@ -855,19 +1004,12 @@ class StockPoolPanel(QWidget):
     def _create_overview_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
         
-        # 说明
-        intro = QLabel(
-            "📊 <b>股票池综合总览</b> - 汇总各来源的筛选结果<br>"
-            f"<span style='color: {Colors.TEXT_SECONDARY};'>"
-            "数据流：投资主线(五维评分) → 【候选池构建】→ 因子开发 → 策略生成<br>"
-            "数据源：JQData成分股 + TuShare Pro行情 + AKShare备选</span>"
-        )
-        intro.setStyleSheet(f"font-size: 14px; color: {Colors.TEXT_PRIMARY};")
-        intro.setTextFormat(Qt.TextFormat.RichText)
-        layout.addWidget(intro)
+        # 模块Banner
+        banner = self._create_module_banner()
+        layout.addWidget(banner)
         
         # 统计卡片
         stats_layout = QHBoxLayout()
@@ -926,6 +1068,53 @@ class StockPoolPanel(QWidget):
         layout.addWidget(self.overview_table)
         
         return widget
+    
+    def _create_module_banner(self) -> QFrame:
+        """创建模块Banner（与其他模块保持一致的渐变透明风格）"""
+        frame = QFrame()
+        frame.setStyleSheet(f"""
+            QFrame {{
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2D1B4E,
+                    stop:1 #4A2C7A
+                );
+                border-radius: 16px;
+                border: 1px solid {Colors.MODULE_POOL_START}40;
+            }}
+        """)
+        
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(32, 28, 32, 28)
+        
+        # 左侧文字
+        text_layout = QVBoxLayout()
+        text_layout.setSpacing(12)
+        
+        title = QLabel("📦 候选池构建")
+        title.setStyleSheet(f"""
+            font-size: 24px;
+            font-weight: 800;
+            color: {Colors.TEXT_PRIMARY};
+        """)
+        text_layout.addWidget(title)
+        
+        subtitle = QLabel(
+            "数据流：投资主线(五维评分) → 【候选池构建】→ 因子开发 → 策略生成\n"
+            "数据源：JQData成分股 + AKShare行情 + MongoDB缓存"
+        )
+        subtitle.setStyleSheet(f"""
+            font-size: 13px;
+            color: {Colors.TEXT_MUTED};
+            line-height: 1.6;
+        """)
+        subtitle.setWordWrap(True)
+        text_layout.addWidget(subtitle)
+        
+        layout.addLayout(text_layout)
+        layout.addStretch()
+        
+        return frame
     
     def _create_stat_card(self, label: str, value: str) -> QFrame:
         card = QFrame()
@@ -1158,6 +1347,9 @@ class StockPoolPanel(QWidget):
         
         self._fill_stock_table(self.overview_table, unique[:50], use_color=True)
         
+        # 保存到缓存
+        self._save_scan_results(unique)
+        
         self.overview_progress.setVisible(False)
         self.scan_all_btn.setEnabled(True)
         self.overview_status.setText(f"✅ 扫描完成！共 {len(unique)} 只股票（去重后）")
@@ -1250,33 +1442,504 @@ class StockPoolPanel(QWidget):
         
         return widget
     
-    def _create_external_tab(self) -> QWidget:
+    def _create_strong_stock_tab(self) -> QWidget:
+        """强势股扫描Tab"""
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(12)
+        layout.setSpacing(16)
         
-        layout.addWidget(QLabel("<b>📋 外部推荐</b> - 整合券商金股、GuruFocus等"))
+        # 说明
+        header = QLabel("<b>🚀 强势股扫描</b> - 全市场扫描非主线强势股票")
+        header.setStyleSheet(f"font-size: 16px; color: {Colors.TEXT_PRIMARY};")
+        layout.addWidget(header)
         
-        data_path = Path.home() / ".local/share/trquant/data/stock_pool/external"
-        layout.addWidget(QLabel(f"📁 数据目录：{data_path}"))
+        desc = QLabel("扫描涨幅榜、创新高、连续上涨、放量上涨等强势信号")
+        desc.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: 13px;")
+        layout.addWidget(desc)
         
-        btn = QPushButton("🔍 解析数据")
-        btn.setStyleSheet(f"background: {Colors.PRIMARY}; color: white; border: none; border-radius: 6px; padding: 10px 20px; font-weight: 600;")
-        btn.clicked.connect(lambda: self._scan_single("external"))
-        layout.addWidget(btn, alignment=Qt.AlignmentFlag.AlignLeft)
+        # 扫描类型选择
+        type_frame = QFrame()
+        type_layout = QHBoxLayout(type_frame)
+        type_layout.setContentsMargins(0, 0, 0, 0)
+        type_layout.setSpacing(12)
         
-        self.external_progress = QProgressBar()
-        self.external_progress.setVisible(False)
-        layout.addWidget(self.external_progress)
+        self.scan_type_combo = QComboBox()
+        self.scan_type_combo.addItems(["全部扫描", "涨幅榜TOP50", "60日创新高", "连续上涨≥3天", "放量上涨(量比≥2)"])
+        self.scan_type_combo.setStyleSheet(f"""
+            QComboBox {{
+                background: {Colors.BG_TERTIARY};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER_PRIMARY};
+                border-radius: 6px;
+                padding: 8px 12px;
+                min-width: 150px;
+            }}
+        """)
+        type_layout.addWidget(self.scan_type_combo)
         
-        self.external_status = QLabel("")
-        layout.addWidget(self.external_status)
+        scan_btn = QPushButton("🔍 开始扫描")
+        scan_btn.setStyleSheet(f"background: {Colors.PRIMARY}; color: white; border: none; border-radius: 6px; padding: 10px 24px; font-weight: 600;")
+        scan_btn.clicked.connect(self._run_strong_stock_scan)
+        type_layout.addWidget(scan_btn)
         
-        self.external_table = self._create_stock_table()
-        layout.addWidget(self.external_table)
+        # 查看全部按钮
+        view_all_btn = QPushButton("📊 查看全部")
+        view_all_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {Colors.BG_TERTIARY};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER_PRIMARY};
+                border-radius: 6px;
+                padding: 10px 24px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background: {Colors.PRIMARY}20;
+                border-color: {Colors.PRIMARY};
+            }}
+        """)
+        view_all_btn.clicked.connect(self._view_strong_stocks_full)
+        type_layout.addWidget(view_all_btn)
+        
+        type_layout.addStretch()
+        layout.addWidget(type_frame)
+        
+        # 进度和状态
+        self.strong_progress = QProgressBar()
+        self.strong_progress.setVisible(False)
+        layout.addWidget(self.strong_progress)
+        
+        self.strong_status = QLabel("")
+        self.strong_status.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
+        layout.addWidget(self.strong_status)
+        
+        # 结果表格
+        self.strong_table = self._create_stock_table([
+            "#", "代码", "名称", "价格", "涨跌幅%", "扫描类型", "量比", "成交额(亿)", "评分"
+        ])
+        layout.addWidget(self.strong_table)
         
         return widget
+    
+    def _view_strong_stocks_full(self):
+        """在弹出窗口中查看全部强势股数据"""
+        if not hasattr(self, 'strong_stocks') or not self.strong_stocks:
+            QMessageBox.information(self, "提示", "请先执行扫描获取数据")
+            return
+        
+        from gui.widgets.data_viewer import show_data_viewer
+        show_data_viewer(
+            parent=self,
+            title="强势股扫描结果",
+            data=self.strong_stocks
+        )
+    
+    def _run_strong_stock_scan(self):
+        """执行强势股扫描"""
+        self.strong_progress.setVisible(True)
+        self.strong_progress.setValue(0)
+        self.strong_status.setText("正在扫描全市场强势股...")
+        self.strong_table.setRowCount(0)
+        
+        scan_type = self.scan_type_combo.currentIndex()
+        
+        # 使用QThread避免阻塞
+        from PyQt6.QtCore import QThread
+        
+        class ScanWorker(QThread):
+            from PyQt6.QtCore import pyqtSignal
+            finished = pyqtSignal(list)
+            progress = pyqtSignal(int, str)
+            
+            def __init__(self, scan_type):
+                super().__init__()
+                self.scan_type = scan_type
+            
+            def run(self):
+                try:
+                    from core.strong_stock_scanner import get_strong_stock_scanner
+                    scanner = get_strong_stock_scanner()
+                    
+                    all_stocks = []
+                    
+                    if self.scan_type == 0:  # 全部扫描
+                        self.progress.emit(20, "扫描涨幅榜...")
+                        result = scanner.scan_top_gainers(30)
+                        all_stocks.extend([s.to_dict() for s in result.stocks])
+                        
+                        self.progress.emit(40, "扫描创新高...")
+                        result = scanner.scan_new_highs(60, 30)
+                        all_stocks.extend([s.to_dict() for s in result.stocks])
+                        
+                        self.progress.emit(60, "扫描连续上涨...")
+                        result = scanner.scan_consecutive_up(3, 30)
+                        all_stocks.extend([s.to_dict() for s in result.stocks])
+                        
+                        self.progress.emit(80, "扫描放量上涨...")
+                        result = scanner.scan_volume_breakout(2.0, 30)
+                        all_stocks.extend([s.to_dict() for s in result.stocks])
+                    elif self.scan_type == 1:
+                        result = scanner.scan_top_gainers(50)
+                        all_stocks = [s.to_dict() for s in result.stocks]
+                    elif self.scan_type == 2:
+                        result = scanner.scan_new_highs(60, 50)
+                        all_stocks = [s.to_dict() for s in result.stocks]
+                    elif self.scan_type == 3:
+                        result = scanner.scan_consecutive_up(3, 50)
+                        all_stocks = [s.to_dict() for s in result.stocks]
+                    elif self.scan_type == 4:
+                        result = scanner.scan_volume_breakout(2.0, 50)
+                        all_stocks = [s.to_dict() for s in result.stocks]
+                    
+                    self.progress.emit(100, "完成")
+                    self.finished.emit(all_stocks)
+                except Exception as e:
+                    self.progress.emit(0, f"错误: {e}")
+                    self.finished.emit([])
+        
+        self.strong_worker = ScanWorker(scan_type)
+        self.strong_worker.progress.connect(
+            lambda p, m: (self.strong_progress.setValue(p), self.strong_status.setText(m))
+        )
+        self.strong_worker.finished.connect(self._on_strong_scan_done)
+        self.strong_worker.start()
+    
+    def _on_strong_scan_done(self, stocks: list):
+        """强势股扫描完成"""
+        self.strong_progress.setVisible(False)
+        
+        if not stocks:
+            self.strong_status.setText("未找到符合条件的股票")
+            return
+        
+        self.strong_status.setText(f"✅ 找到 {len(stocks)} 只强势股")
+        
+        # 填充表格
+        self.strong_table.setRowCount(len(stocks))
+        
+        type_names = {
+            'top_gainers': '涨幅榜',
+            'new_high': '创新高',
+            'consecutive_up': '连续上涨',
+            'volume_breakout': '放量上涨'
+        }
+        
+        for i, stock in enumerate(stocks):
+            self.strong_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+            self.strong_table.setItem(i, 1, QTableWidgetItem(stock.get('code', '')))
+            self.strong_table.setItem(i, 2, QTableWidgetItem(stock.get('name', '')))
+            self.strong_table.setItem(i, 3, QTableWidgetItem(f"{stock.get('price', 0):.2f}"))
+            
+            change = stock.get('change_pct', 0)
+            change_item = QTableWidgetItem(f"{change:+.2f}%")
+            change_item.setForeground(QColor("#10B981" if change > 0 else "#EF4444"))
+            self.strong_table.setItem(i, 4, change_item)
+            
+            self.strong_table.setItem(i, 5, QTableWidgetItem(type_names.get(stock.get('scan_type', ''), '')))
+            self.strong_table.setItem(i, 6, QTableWidgetItem(f"{stock.get('volume_ratio', 0):.2f}"))
+            self.strong_table.setItem(i, 7, QTableWidgetItem(f"{stock.get('turnover', 0):.2f}"))
+            self.strong_table.setItem(i, 8, QTableWidgetItem(f"{stock.get('score', 0):.0f}"))
+        
+        # 存储数据用于导出
+        self.strong_stocks = stocks
+    
+    def _create_external_tab(self) -> QWidget:
+        """导入导出Tab"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(16)
+        
+        header = QLabel("<b>📋 导入导出</b> - 外部数据导入与候选池导出")
+        header.setStyleSheet(f"font-size: 16px; color: {Colors.TEXT_PRIMARY};")
+        layout.addWidget(header)
+        
+        # 导入区域
+        import_frame = QFrame()
+        import_frame.setStyleSheet(f"background: {Colors.BG_TERTIARY}; border-radius: 10px; padding: 16px;")
+        import_layout = QVBoxLayout(import_frame)
+        import_layout.setSpacing(12)
+        
+        import_title = QLabel("📥 导入外部股票列表")
+        import_title.setStyleSheet(f"font-weight: bold; color: {Colors.TEXT_PRIMARY};")
+        import_layout.addWidget(import_title)
+        
+        import_desc = QLabel('支持CSV/Excel格式，需包含"代码"或"code"列')
+        import_desc.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: 12px;")
+        import_layout.addWidget(import_desc)
+        
+        import_btn_layout = QHBoxLayout()
+        
+        import_btn = QPushButton("📁 选择文件导入")
+        import_btn.setStyleSheet(f"background: {Colors.PRIMARY}; color: white; border: none; border-radius: 6px; padding: 10px 20px; font-weight: 600;")
+        import_btn.clicked.connect(self._import_from_file)
+        import_btn_layout.addWidget(import_btn)
+        
+        import_btn_layout.addStretch()
+        import_layout.addLayout(import_btn_layout)
+        
+        self.import_status = QLabel("")
+        self.import_status.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
+        import_layout.addWidget(self.import_status)
+        
+        self.import_table = self._create_stock_table(["#", "代码", "名称", "来源", "导入时间"])
+        self.import_table.setMaximumHeight(200)
+        import_layout.addWidget(self.import_table)
+        
+        layout.addWidget(import_frame)
+        
+        # 导出区域
+        export_frame = QFrame()
+        export_frame.setStyleSheet(f"background: {Colors.BG_TERTIARY}; border-radius: 10px; padding: 16px;")
+        export_layout = QVBoxLayout(export_frame)
+        export_layout.setSpacing(12)
+        
+        export_title = QLabel("📤 导出候选池到Excel")
+        export_title.setStyleSheet(f"font-weight: bold; color: {Colors.TEXT_PRIMARY};")
+        export_layout.addWidget(export_title)
+        
+        export_desc = QLabel("将当前候选池导出为Excel文件")
+        export_desc.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: 12px;")
+        export_layout.addWidget(export_desc)
+        
+        export_btn = QPushButton("💾 导出到Excel")
+        export_btn.setStyleSheet(f"background: #10B981; color: white; border: none; border-radius: 6px; padding: 10px 20px; font-weight: 600;")
+        export_btn.clicked.connect(self._export_to_excel)
+        export_layout.addWidget(export_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+        
+        self.export_status = QLabel("")
+        self.export_status.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
+        export_layout.addWidget(self.export_status)
+        
+        layout.addWidget(export_frame)
+        layout.addStretch()
+        
+        return widget
+    
+    def _import_from_file(self):
+        """从文件导入"""
+        from PyQt6.QtWidgets import QFileDialog
+        
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择股票列表文件",
+            "",
+            "Excel文件 (*.xlsx *.xls);;CSV文件 (*.csv);;所有文件 (*)"
+        )
+        
+        if not file_path:
+            return
+        
+        try:
+            from core.pool_io_manager import get_pool_io_manager
+            
+            manager = get_pool_io_manager()
+            result = manager.import_from_file(file_path)
+            
+            if result.success:
+                self.import_status.setText(f"✅ 成功导入 {result.imported_count} 只股票")
+                
+                # 填充表格
+                self.import_table.setRowCount(len(result.stocks))
+                for i, stock in enumerate(result.stocks):
+                    self.import_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+                    self.import_table.setItem(i, 1, QTableWidgetItem(stock.get('code', '')))
+                    self.import_table.setItem(i, 2, QTableWidgetItem(stock.get('name', '')))
+                    self.import_table.setItem(i, 3, QTableWidgetItem(stock.get('source', 'import')))
+                    self.import_table.setItem(i, 4, QTableWidgetItem(stock.get('import_time', '')))
+                
+                # 保存到实例变量
+                self.imported_stocks = result.stocks
+            else:
+                self.import_status.setText(f"❌ 导入失败: {result.errors[0] if result.errors else '未知错误'}")
+                
+        except Exception as e:
+            self.import_status.setText(f"❌ 导入错误: {e}")
+    
+    def _export_to_excel(self):
+        """导出到Excel"""
+        # 收集所有扫描结果
+        all_stocks = []
+        
+        # 从各个表格收集数据
+        for table_name in ['mainline_table', 'tech_table', 'etf_table']:
+            table = getattr(self, table_name, None)
+            if table and table.rowCount() > 0:
+                for row in range(table.rowCount()):
+                    code_item = table.item(row, 1)
+                    name_item = table.item(row, 2)
+                    if code_item:
+                        all_stocks.append({
+                            'code': code_item.text(),
+                            'name': name_item.text() if name_item else '',
+                            'source': table_name.replace('_table', '')
+                        })
+        
+        # 添加强势股
+        if hasattr(self, 'strong_stocks') and self.strong_stocks:
+            all_stocks.extend(self.strong_stocks)
+        
+        # 添加导入的股票
+        if hasattr(self, 'imported_stocks') and self.imported_stocks:
+            all_stocks.extend(self.imported_stocks)
+        
+        if not all_stocks:
+            self.export_status.setText("⚠️ 没有可导出的数据，请先执行扫描")
+            return
+        
+        try:
+            from core.pool_io_manager import get_pool_io_manager
+            
+            manager = get_pool_io_manager()
+            result = manager.export_to_excel(all_stocks)
+            
+            if result.success:
+                self.export_status.setText(f"✅ 已导出 {result.row_count} 只股票到:\n{result.file_path}")
+            else:
+                self.export_status.setText(f"❌ 导出失败: {result.error}")
+                
+        except Exception as e:
+            self.export_status.setText(f"❌ 导出错误: {e}")
+    
+    def _create_version_tab(self) -> QWidget:
+        """版本管理Tab"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(16)
+        
+        header = QLabel("<b>📁 版本管理</b> - 候选池历史版本与变更追踪")
+        header.setStyleSheet(f"font-size: 16px; color: {Colors.TEXT_PRIMARY};")
+        layout.addWidget(header)
+        
+        # 保存版本按钮
+        btn_layout = QHBoxLayout()
+        
+        save_btn = QPushButton("💾 保存当前版本")
+        save_btn.setStyleSheet(f"background: {Colors.PRIMARY}; color: white; border: none; border-radius: 6px; padding: 10px 20px; font-weight: 600;")
+        save_btn.clicked.connect(self._save_version)
+        btn_layout.addWidget(save_btn)
+        
+        compare_btn = QPushButton("🔄 对比版本")
+        compare_btn.setStyleSheet(f"background: {Colors.BG_TERTIARY}; color: {Colors.TEXT_PRIMARY}; border: 1px solid {Colors.BORDER_PRIMARY}; border-radius: 6px; padding: 10px 20px; font-weight: 600;")
+        compare_btn.clicked.connect(self._compare_versions)
+        btn_layout.addWidget(compare_btn)
+        
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+        
+        self.version_status = QLabel("")
+        self.version_status.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
+        layout.addWidget(self.version_status)
+        
+        # 版本列表
+        self.version_table = QTableWidget()
+        self.version_table.setColumnCount(4)
+        self.version_table.setHorizontalHeaderLabels(["版本ID", "创建时间", "股票数量", "描述"])
+        self.version_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.version_table.setStyleSheet(f"""
+            QTableWidget {{
+                background-color: {Colors.BG_PRIMARY};
+                border: 1px solid {Colors.BORDER_PRIMARY};
+                border-radius: 8px;
+            }}
+        """)
+        layout.addWidget(self.version_table)
+        
+        # 加载版本列表
+        self._load_versions()
+        
+        return widget
+    
+    def _save_version(self):
+        """保存当前版本"""
+        # 收集所有股票
+        all_stocks = []
+        
+        for table_name in ['mainline_table', 'tech_table', 'etf_table']:
+            table = getattr(self, table_name, None)
+            if table and table.rowCount() > 0:
+                for row in range(table.rowCount()):
+                    code_item = table.item(row, 1)
+                    name_item = table.item(row, 2)
+                    if code_item:
+                        all_stocks.append({
+                            'code': code_item.text(),
+                            'name': name_item.text() if name_item else '',
+                            'source': table_name.replace('_table', '')
+                        })
+        
+        if hasattr(self, 'strong_stocks') and self.strong_stocks:
+            all_stocks.extend(self.strong_stocks)
+        
+        if not all_stocks:
+            self.version_status.setText("⚠️ 没有可保存的数据")
+            return
+        
+        try:
+            from core.pool_io_manager import get_pool_io_manager
+            
+            manager = get_pool_io_manager()
+            version = manager.save_version(all_stocks, "手动保存")
+            
+            self.version_status.setText(f"✅ 已保存版本 {version.version_id}，共 {version.stock_count} 只股票")
+            self._load_versions()
+            
+        except Exception as e:
+            self.version_status.setText(f"❌ 保存失败: {e}")
+    
+    def _load_versions(self):
+        """加载版本列表"""
+        try:
+            from core.pool_io_manager import get_pool_io_manager
+            
+            manager = get_pool_io_manager()
+            versions = manager.get_versions()
+            
+            self.version_table.setRowCount(len(versions))
+            for i, v in enumerate(versions):
+                self.version_table.setItem(i, 0, QTableWidgetItem(v.version_id))
+                self.version_table.setItem(i, 1, QTableWidgetItem(v.created_at))
+                self.version_table.setItem(i, 2, QTableWidgetItem(str(v.stock_count)))
+                self.version_table.setItem(i, 3, QTableWidgetItem(v.description))
+                
+        except Exception as e:
+            logger.warning(f"加载版本列表失败: {e}")
+    
+    def _compare_versions(self):
+        """对比版本"""
+        selected = self.version_table.selectedItems()
+        if len(selected) < 2:
+            self.version_status.setText("⚠️ 请选择两个版本进行对比")
+            return
+        
+        rows = list(set(item.row() for item in selected))
+        if len(rows) < 2:
+            self.version_status.setText("⚠️ 请选择两个不同的版本")
+            return
+        
+        try:
+            from core.pool_io_manager import get_pool_io_manager
+            
+            manager = get_pool_io_manager()
+            v1_id = self.version_table.item(rows[0], 0).text()
+            v2_id = self.version_table.item(rows[1], 0).text()
+            
+            diff = manager.compare_versions(v1_id, v2_id)
+            
+            if diff:
+                msg = f"版本对比 {v1_id} vs {v2_id}:\n\n"
+                msg += f"📈 新增: {len(diff.added)} 只\n"
+                msg += f"📉 移除: {len(diff.removed)} 只\n"
+                msg += f"➡️ 不变: {len(diff.unchanged)} 只"
+                
+                self.version_status.setText(msg)
+            else:
+                self.version_status.setText("⚠️ 无法对比版本")
+                
+        except Exception as e:
+            self.version_status.setText(f"❌ 对比失败: {e}")
     
     def _create_signal_tab(self) -> QWidget:
         widget = QWidget()
@@ -1362,22 +2025,28 @@ class StockPoolPanel(QWidget):
             self.workers['etf'].start()
             
         elif scan_type == "external":
-            self.external_table.setRowCount(0)
-            self.external_progress.setVisible(True)
-            self.external_progress.setValue(0)
+            # 外部数据扫描已移至导入导出Tab
+            self.import_table.setRowCount(0)
+            self.import_status.setText("正在解析外部数据...")
             
             self.workers['external'] = ExternalParseWorker()
-            self.workers['external'].progress.connect(
-                lambda p, m: (self.external_progress.setValue(p), self.external_status.setText(m))
-            )
             self.workers['external'].finished.connect(
                 lambda stocks, src: (
-                    self.external_progress.setVisible(False),
-                    self.external_status.setText(f"✅ 完成 [{src}]"),
-                    self._fill_stock_table(self.external_table, stocks, use_color=False)
+                    self.import_status.setText(f"✅ 完成 [{src}]: {len(stocks)} 只股票"),
+                    self._fill_import_table(stocks)
                 )
             )
             self.workers['external'].start()
+    
+    def _fill_import_table(self, stocks: list):
+        """填充导入表格"""
+        self.import_table.setRowCount(len(stocks))
+        for i, stock in enumerate(stocks):
+            self.import_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+            self.import_table.setItem(i, 1, QTableWidgetItem(str(stock.get('code', ''))))
+            self.import_table.setItem(i, 2, QTableWidgetItem(str(stock.get('name', ''))))
+            self.import_table.setItem(i, 3, QTableWidgetItem(str(stock.get('source', 'external'))))
+            self.import_table.setItem(i, 4, QTableWidgetItem(''))
     
     def _on_etf_single_done(self, etfs: list, source: str):
         self.etf_progress.setVisible(False)
@@ -1401,7 +2070,7 @@ class StockPoolPanel(QWidget):
     
     def _generate_code(self):
         codes = set()
-        for table in [self.mainline_table, self.tech_table, self.external_table]:
+        for table in [self.mainline_table, self.tech_table, self.import_table]:
             for row in range(table.rowCount()):
                 item = table.item(row, 1)
                 if item:

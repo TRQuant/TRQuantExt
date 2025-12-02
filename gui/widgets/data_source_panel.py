@@ -31,6 +31,193 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
+# 数据源测试工作线程
+# ============================================================
+
+class DataSourceTestWorker(QThread):
+    """数据源连接测试工作线程 - 避免阻塞UI"""
+    finished = pyqtSignal(str, dict)  # source_name, result
+    progress = pyqtSignal(str)  # status message
+    
+    def __init__(self, source_name: str, parent=None):
+        super().__init__(parent)
+        self.source_name = source_name
+    
+    def run(self):
+        """执行测试"""
+        try:
+            self.progress.emit(f"正在测试 {self.source_name}...")
+            
+            if "JQData" in self.source_name:
+                result = self._test_jqdata()
+            elif "AKShare" in self.source_name:
+                result = self._test_akshare()
+            elif "TuShare" in self.source_name:
+                result = self._test_tushare()
+            elif "Baostock" in self.source_name:
+                result = self._test_baostock()
+            elif "通达信" in self.source_name or "TDX" in self.source_name:
+                result = self._test_tdx()
+            else:
+                result = {"success": False, "message": f"未知数据源: {self.source_name}"}
+            
+            self.finished.emit(self.source_name, result)
+            
+        except Exception as e:
+            self.finished.emit(self.source_name, {
+                "success": False, 
+                "message": f"测试异常: {str(e)}"
+            })
+    
+    def _test_jqdata(self) -> dict:
+        """测试JQData连接"""
+        try:
+            import jqdatasdk as jq
+            from config.config_manager import ConfigManager
+            
+            config = ConfigManager()
+            jq_config = config.load_config("jqdata_config.json")
+            
+            if not jq_config:
+                return {"success": False, "message": "未找到JQData配置文件\n请在 config/ 目录下创建 jqdata_config.json"}
+            
+            username = jq_config.get("username", "")
+            password = jq_config.get("password", "")
+            
+            if not username or not password:
+                return {"success": False, "message": "JQData配置不完整\n缺少用户名或密码"}
+            
+            # 先登出再登录
+            try:
+                jq.logout()
+            except:
+                pass
+            
+            jq.auth(username, password)
+            
+            # 测试获取数据
+            test_result = jq.get_query_count()
+            
+            return {
+                "success": True,
+                "message": f"JQData连接成功!\n\n今日剩余请求次数: {test_result.get('spare', 'N/A')}\n账户类型: 试用账户"
+            }
+        except Exception as e:
+            return {"success": False, "message": f"JQData连接失败:\n{str(e)}"}
+    
+    def _test_akshare(self) -> dict:
+        """测试AKShare连接"""
+        try:
+            import akshare as ak
+            
+            # 测试获取股票列表（轻量级请求）
+            df = ak.stock_info_a_code_name()
+            
+            if df is not None and len(df) > 0:
+                return {
+                    "success": True,
+                    "message": f"AKShare连接成功!\n\n获取到 {len(df)} 只A股股票信息\n数据源状态: 正常"
+                }
+            else:
+                return {"success": False, "message": "AKShare返回空数据"}
+        except Exception as e:
+            return {"success": False, "message": f"AKShare连接失败:\n{str(e)}"}
+    
+    def _test_tushare(self) -> dict:
+        """测试TuShare连接"""
+        try:
+            import tushare as ts
+            from config.config_manager import ConfigManager
+            
+            config = ConfigManager()
+            ts_config = config.load_config("tushare_config.json")
+            
+            if not ts_config:
+                return {"success": False, "message": "未找到TuShare配置\n请配置 config/tushare_config.json"}
+            
+            token = ts_config.get("token", "")
+            if not token:
+                return {"success": False, "message": "TuShare token未配置"}
+            
+            pro = ts.pro_api(token)
+            df = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name')
+            
+            if df is not None and len(df) > 0:
+                return {
+                    "success": True,
+                    "message": f"TuShare连接成功!\n\n获取到 {len(df)} 只股票信息"
+                }
+            else:
+                return {"success": False, "message": "TuShare返回空数据"}
+        except Exception as e:
+            return {"success": False, "message": f"TuShare连接失败:\n{str(e)}"}
+    
+    def _test_baostock(self) -> dict:
+        """测试Baostock连接"""
+        try:
+            import baostock as bs
+            
+            login_result = bs.login()
+            
+            if login_result.error_code == '0':
+                # 测试获取数据
+                rs = bs.query_stock_basic()
+                count = 0
+                while rs.next():
+                    count += 1
+                    if count >= 10:
+                        break
+                
+                bs.logout()
+                
+                return {
+                    "success": True,
+                    "message": f"Baostock连接成功!\n\n登录状态: 正常\n可获取历史数据"
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": f"Baostock登录失败:\n{login_result.error_msg}"
+                }
+        except Exception as e:
+            return {"success": False, "message": f"Baostock连接失败:\n{str(e)}"}
+    
+    def _test_tdx(self) -> dict:
+        """测试通达信本地数据"""
+        from pathlib import Path
+        
+        # 常见通达信安装路径
+        common_paths = [
+            Path.home() / "通达信",
+            Path("/opt/通达信"),
+            Path.home() / ".wine/drive_c/new_tdx",
+            Path.home() / ".wine/drive_c/tdx",
+            Path("/mnt/c/new_tdx"),
+        ]
+        
+        for tdx_path in common_paths:
+            data_path = tdx_path / "vipdoc"
+            if data_path.exists():
+                # 检查数据目录
+                sh_path = data_path / "sh" / "lday"
+                sz_path = data_path / "sz" / "lday"
+                
+                sh_count = len(list(sh_path.glob("*.day"))) if sh_path.exists() else 0
+                sz_count = len(list(sz_path.glob("*.day"))) if sz_path.exists() else 0
+                
+                if sh_count > 0 or sz_count > 0:
+                    return {
+                        "success": True,
+                        "message": f"通达信数据找到!\n\n路径: {tdx_path}\n沪市日线: {sh_count}个文件\n深市日线: {sz_count}个文件"
+                    }
+        
+        return {
+            "success": False,
+            "message": "未找到通达信数据目录\n\n请安装通达信客户端并下载盘后数据\n或在 config/tdx_config.json 中配置路径"
+        }
+
+
+# ============================================================
 # 信息源数据库（完整版）
 # ============================================================
 
@@ -941,6 +1128,13 @@ class DataSourceStatusWidget(QFrame):
             status_color = "#10B981" if is_ok else "#EF4444"
             status_text = "已连接" if is_ok else "未连接"
             
+            # 显示账户类型
+            account_type = status.get('account_type', '')
+            if account_type and account_type != 'N/A':
+                type_map = {'trial': '试用版', 'standard': '标准版', 'premium': '高级版'}
+                type_text = type_map.get(account_type, account_type)
+                status_text = f"{status_text} ({type_text})"
+            
             status_label = QLabel(f"● {status_text}")
             status_label.setStyleSheet(f"font-size: 11px; color: {status_color}; font-weight: 600;")
             row_layout.addWidget(status_label)
@@ -956,18 +1150,46 @@ class DataSourceStatusWidget(QFrame):
     def _get_sources_status(self) -> dict:
         """获取数据源状态"""
         try:
-            from data_sources import DataSourceManager
-            manager = DataSourceManager(use_cache=True)
-            manager.connect_source('akshare')
-            status = manager.get_status()
-            return status.get('sources', {})
+            # 使用新的数据源管理器
+            from core.data_source_manager import get_data_source_manager
+            
+            manager = get_data_source_manager()
+            all_status = manager.get_all_status()
+            
+            result = {}
+            for source_type, status in all_status.items():
+                name_map = {
+                    'jqdata': 'JQData',
+                    'akshare': 'AKShare',
+                    'baostock': 'Baostock',
+                    'local_cache': 'MongoDB'
+                }
+                display_name = name_map.get(source_type.value, source_type.value)
+                
+                result[display_name] = {
+                    'status': 'ok' if status.is_available else 'error',
+                    'account_type': status.account_type.value if status.is_available else 'N/A',
+                    'date_range': f"{status.start_date or 'N/A'} ~ {status.end_date or 'N/A'}" if status.is_available else '',
+                    'is_realtime': status.is_realtime
+                }
+            
+            return result
+            
         except Exception as e:
             logger.error(f"获取数据源状态失败: {e}")
-            return {
-                "JQData": {"status": "unknown"},
-                "AKShare": {"status": "unknown"},
-                "MongoDB": {"status": "unknown"},
-            }
+            # 回退到旧方法
+            try:
+                from data_sources import DataSourceManager
+                manager = DataSourceManager(use_cache=True)
+                manager.connect_source('akshare')
+                status = manager.get_status()
+                return status.get('sources', {})
+            except:
+                return {
+                    "JQData": {"status": "unknown"},
+                    "AKShare": {"status": "unknown"},
+                    "MongoDB": {"status": "unknown"},
+                }
 
 
 class DataSourcePanel(QWidget):
@@ -986,15 +1208,25 @@ class DataSourcePanel(QWidget):
     def _init_data_manager(self):
         """初始化数据源管理器"""
         try:
-            from data_sources import DataSourceManager
-            from data_sources.theme_discovery import ThemeDiscovery
-            from data_sources.cache_manager import MongoDBCache
+            # 优先使用新的数据源管理器
+            from core.data_source_manager import get_data_source_manager
+            self.new_data_manager = get_data_source_manager()
             
-            self.data_manager = DataSourceManager(use_cache=True)
-            self.data_manager.connect_source('akshare')
-            
-            cache = MongoDBCache()
-            self.theme_discovery = ThemeDiscovery(cache=cache, data_manager=self.data_manager)
+            # 保留旧管理器兼容性
+            try:
+                from data_sources import DataSourceManager
+                from data_sources.theme_discovery import ThemeDiscovery
+                from data_sources.cache_manager import MongoDBCache
+                
+                self.data_manager = DataSourceManager(use_cache=True)
+                self.data_manager.connect_source('akshare')
+                
+                cache = MongoDBCache()
+                self.theme_discovery = ThemeDiscovery(cache=cache, data_manager=self.data_manager)
+            except Exception as e:
+                logger.debug(f"旧数据源管理器初始化失败（可忽略）: {e}")
+                self.data_manager = None
+                self.theme_discovery = None
             
             logger.info("数据源管理器初始化成功")
         except Exception as e:
@@ -1005,7 +1237,7 @@ class DataSourcePanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         
-        # 创建Tab控件
+        # 创建Tab控件（使用信息获取模块主题色）
         self.tab_widget = QTabWidget()
         self.tab_widget.setStyleSheet(f"""
             QTabWidget::pane {{
@@ -1023,8 +1255,8 @@ class DataSourcePanel(QWidget):
             }}
             QTabBar::tab:selected {{
                 background-color: {Colors.BG_SECONDARY};
-                color: {Colors.PRIMARY};
-                border-bottom: 3px solid {Colors.PRIMARY};
+                color: {Colors.MODULE_DATA_START};
+                border-bottom: 3px solid {Colors.MODULE_DATA_START};
             }}
             QTabBar::tab:hover:!selected {{
                 background-color: {Colors.BG_TERTIARY};
@@ -1305,7 +1537,7 @@ class DataSourcePanel(QWidget):
                 "name": "API数据源",
                 "desc": "程序化接口获取的标准化数据",
                 "color": "#3B82F6",
-                "items": ["JQData (主力)", "AKShare (免费)", "TuShare", "Baostock"],
+                "items": ["JQData (主力)", "AKShare (免费)", "Baostock", "通达信(TDX)"],
                 "usage": "因子计算、回测、实盘"
             },
             {
@@ -1399,6 +1631,7 @@ class DataSourcePanel(QWidget):
                     "投资主线 → 提供板块和资金流向数据",
                 ],
                 "api_example": "from jqdatasdk import *\nauth('账号', '密码')\ndf = get_price('000001.XSHE', start_date='2024-01-01')",
+                "test_func": "test_jqdata",
             },
             {
                 "name": "AKShare",
@@ -1412,6 +1645,7 @@ class DataSourcePanel(QWidget):
                     "宏观分析 → 获取宏观经济指标",
                 ],
                 "api_example": "import akshare as ak\ndf = ak.stock_zh_a_spot_em()  # 获取A股实时行情",
+                "test_func": "test_akshare",
             },
             {
                 "name": "TuShare Pro",
@@ -1424,6 +1658,35 @@ class DataSourcePanel(QWidget):
                     "跨市场分析 → 获取港股等数据",
                 ],
                 "api_example": "import tushare as ts\npro = ts.pro_api('TOKEN')\ndf = pro.daily(ts_code='000001.SZ')",
+                "test_func": "test_tushare",
+            },
+            {
+                "name": "Baostock",
+                "status": "可配置",
+                "color": "#10B981",
+                "desc": "证券宝开源数据，提供长历史数据（适合试用账户补充）",
+                "data_types": ["日K线(1990年至今)", "分钟线", "财务数据", "除权因子"],
+                "usage_in_workflow": [
+                    "历史数据 → 提供超长历史回测数据",
+                    "JQData备用 → 试用账户时的数据补充",
+                    "因子计算 → 提供财务数据支持",
+                ],
+                "api_example": "import baostock as bs\nbs.login()\nrs = bs.query_history_k_data('sh.600519', 'date,open,close')",
+                "test_func": "test_baostock",
+            },
+            {
+                "name": "通达信(TDX)",
+                "status": "可配置",
+                "color": "#8B5CF6",
+                "desc": "读取本地通达信数据文件，支持分钟级数据",
+                "data_types": ["日K线", "分钟K线", "Tick数据", "财务数据"],
+                "usage_in_workflow": [
+                    "本地数据 → 读取已下载的通达信数据",
+                    "高频回测 → 提供分钟级历史数据",
+                    "离线分析 → 无需网络即可分析",
+                ],
+                "api_example": "from core.tdx_data_reader import TDXDataReader\nreader = TDXDataReader('/path/to/tdx')\ndf = reader.read_daily_data('000001')",
+                "test_func": "test_tdx",
             },
         ]
         
@@ -1457,6 +1720,26 @@ class DataSourcePanel(QWidget):
             """)
             header.addWidget(status)
             header.addStretch()
+            
+            # 测试连接按钮
+            test_btn = QPushButton("🔗 测试连接")
+            test_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {Colors.PRIMARY};
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
+                    padding: 6px 12px;
+                    font-size: 11px;
+                    font-weight: 600;
+                }}
+                QPushButton:hover {{
+                    background-color: {Colors.PRIMARY_DARK};
+                }}
+            """)
+            test_func_name = source.get('test_func', 'test_' + source['name'].lower().replace(' ', '_'))
+            test_btn.clicked.connect(lambda checked, name=source['name']: self._test_data_source(name))
+            header.addWidget(test_btn)
             
             # 配置按钮
             config_btn = QPushButton("⚙️ 配置")
@@ -2880,3 +3163,46 @@ class DataSourcePanel(QWidget):
                 self.cache_status_label.setText("⚠️ 缓存管理器未初始化")
         except Exception as e:
             self.cache_status_label.setText(f"❌ 错误: {e}")
+    
+    def _test_data_source(self, source_name: str):
+        """测试数据源连接 - 使用异步线程，保持UI响应"""
+        # 如果已有测试在运行，先等待
+        if hasattr(self, '_test_worker') and self._test_worker and self._test_worker.isRunning():
+            QMessageBox.information(self, "请稍候", "正在测试其他数据源，请稍后重试")
+            return
+        
+        # 显示等待状态
+        self._show_testing_status(source_name)
+        
+        # 创建并启动工作线程
+        self._test_worker = DataSourceTestWorker(source_name)
+        self._test_worker.progress.connect(self._on_test_progress)
+        self._test_worker.finished.connect(self._on_test_finished)
+        self._test_worker.start()
+    
+    def _show_testing_status(self, source_name: str):
+        """显示测试中状态"""
+        # 可以在UI上显示一个提示
+        logger.info(f"🔄 开始测试数据源: {source_name}")
+    
+    def _on_test_progress(self, message: str):
+        """测试进度更新"""
+        logger.info(message)
+    
+    def _on_test_finished(self, source_name: str, result: dict):
+        """测试完成回调"""
+        if result["success"]:
+            QMessageBox.information(
+                self, 
+                f"✅ {source_name} 连接成功",
+                result["message"]
+            )
+        else:
+            QMessageBox.warning(
+                self,
+                f"❌ {source_name} 连接失败",
+                result["message"]
+            )
+    
+    # 注：数据源测试方法已移至 DataSourceTestWorker 类中
+    # 采用异步线程执行，避免阻塞UI

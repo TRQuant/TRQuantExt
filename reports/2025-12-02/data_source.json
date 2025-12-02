@@ -1,0 +1,24 @@
+{
+  "success": true,
+  "summary": "✅ 3/4 数据源正常",
+  "details": {
+    "jqdata": {
+      "connected": true,
+      "message": "剩余938600次查询",
+      "account_type": "试用账户"
+    },
+    "akshare": {
+      "connected": false,
+      "message": "('Connection aborted.', RemoteDisconnected('Remote"
+    },
+    "baostock": {
+      "connected": true,
+      "message": "登录成功"
+    },
+    "mongodb": {
+      "connected": true,
+      "message": "5个集合"
+    }
+  },
+  "timestamp": "2025-12-02T00:46:19.590296"
+}

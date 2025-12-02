@@ -548,13 +548,13 @@ class MomentumGrowthScanner:
             return 0.0, {}
         
         try:
-            # 查询财务指标
+            # 查询财务指标 (使用正确的JQData字段名)
             q = query(
                 valuation.code,
                 indicator.roe,
-                indicator.net_profit_growth_rate,
-                indicator.operating_revenue_growth_rate,
-                indicator.eps_growth_rate
+                indicator.inc_net_profit_year_on_year,  # 净利润同比增长率
+                indicator.inc_revenue_year_on_year,  # 营收同比增长率
+                indicator.eps  # 每股收益（替代eps_growth_rate）
             ).filter(
                 valuation.code == stock_code
             )
@@ -566,9 +566,9 @@ class MomentumGrowthScanner:
             
             row = df.iloc[0]
             roe = row.get('roe', 0) or 0
-            net_profit_growth = row.get('net_profit_growth_rate', 0) or 0
-            revenue_growth = row.get('operating_revenue_growth_rate', 0) or 0
-            eps_growth = row.get('eps_growth_rate', 0) or 0
+            net_profit_growth = row.get('inc_net_profit_year_on_year', 0) or 0
+            revenue_growth = row.get('inc_revenue_year_on_year', 0) or 0
+            eps_growth = net_profit_growth  # 用净利润增长率近似EPS增长率
             
             # 计算成长得分
             growth_score = 0.0

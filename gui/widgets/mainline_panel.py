@@ -109,7 +109,7 @@ class MainlinePanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         
-        # 创建Tab控件
+        # Tab控件直接在最上面
         self.tab_widget = QTabWidget()
         self.tab_widget.setStyleSheet(f"""
             QTabWidget::pane {{
@@ -120,15 +120,18 @@ class MainlinePanel(QWidget):
                 background-color: {Colors.BG_PRIMARY};
                 color: {Colors.TEXT_MUTED};
                 border: none;
-                padding: 10px 16px;
-                font-size: 12px;
+                padding: 12px 20px;
+                font-size: 13px;
                 font-weight: 600;
                 min-width: 80px;
             }}
             QTabBar::tab:selected {{
                 background-color: {Colors.BG_SECONDARY};
-                color: {Colors.PRIMARY};
-                border-bottom: 3px solid {Colors.PRIMARY};
+                color: {Colors.MODULE_MAINLINE_START};
+                border-bottom: 3px solid {Colors.MODULE_MAINLINE_START};
+            }}
+            QTabBar {{
+                background-color: {Colors.BG_PRIMARY};
             }}
             QTabBar::tab:hover:!selected {{
                 background-color: {Colors.BG_TERTIARY};
@@ -147,6 +150,7 @@ class MainlinePanel(QWidget):
         self.tab_widget.addTab(self._create_policy_tab(), "📜 政策")
         self.tab_widget.addTab(self._create_leader_tab(), "👑 龙头")
         self.tab_widget.addTab(self._create_composite_tab(), "🎯 综合评分")  # 专业投资主线
+        self.tab_widget.addTab(self._create_history_tab(), "📅 历史查询")  # 时间维度历史
         # 候选池已在侧边栏独立模块，此处不再重复
         
         self.tab_widget.addTab(self._create_research_tab(), "📋 调研笔记")
@@ -1953,6 +1957,24 @@ class MainlinePanel(QWidget):
         layout.addWidget(result_frame)
         
         return widget
+    
+    # ================================================================
+    # Tab: 历史查询 (时间维度)
+    # ================================================================
+    def _create_history_tab(self) -> QWidget:
+        """创建历史查询Tab - 时间维度功能"""
+        try:
+            from gui.widgets.history_viewer_tab import HistoryViewerTab
+            return HistoryViewerTab(self)
+        except Exception as e:
+            logger.error(f"创建历史查询Tab失败: {e}")
+            # 返回占位Widget
+            widget = QWidget()
+            layout = QVBoxLayout(widget)
+            error_label = QLabel(f"历史查询功能加载失败: {e}")
+            error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(error_label)
+            return widget
     
     # ================================================================
     # Tab 7: 实时监控

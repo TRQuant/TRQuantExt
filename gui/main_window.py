@@ -14,8 +14,11 @@ from pathlib import Path
 import subprocess
 import sys
 import webbrowser
+import logging
 
 from gui.styles.theme import Colors, Typography, ButtonStyles, CardStyles
+
+logger = logging.getLogger(__name__)
 
 
 class SidebarButton(QPushButton):
@@ -313,12 +316,13 @@ class MainWindow(QMainWindow):
         nav_items = [
             ("🏠", "工作台", 0),
             ("📡", "信息获取", 1),       # 步骤1: 数据源、知识库、资讯
-            ("🔥", "投资主线", 2),       # 步骤2: 五维量化→综合评分→主线识别
-            ("📦", "候选池", 3),         # 步骤3: 股票池+ETF池构建（独立模块）
-            ("📊", "因子构建", 4),       # 步骤4: 因子库+计算+组合
-            ("🛠️", "策略开发", 5),       # 步骤5: 策略生成（整合）
-            ("📈", "回测验证", 6),       # 步骤6: 回测
-            ("🚀", "实盘交易", 7),       # 步骤7: 实盘
+            ("📈", "市场趋势", 2),       # 步骤2: 市场趋势识别（短/中/长期）
+            ("🔥", "投资主线", 3),       # 步骤3: 五维量化→综合评分→主线识别
+            ("📦", "候选池", 4),         # 步骤4: 股票池+ETF池构建（独立模块）
+            ("📊", "因子构建", 5),       # 步骤5: 因子库+计算+组合
+            ("🛠️", "策略开发", 6),       # 步骤6: 策略生成（整合）
+            ("🔄", "回测验证", 7),       # 步骤7: 回测
+            ("🚀", "实盘交易", 8),       # 步骤8: 实盘
         ]
         
         self.nav_buttons = []
@@ -344,8 +348,8 @@ class MainWindow(QMainWindow):
         layout.addSpacing(8)
         
         sys_items = [
-            ("⚙️", "系统设置", 8),
-            ("📋", "运行日志", 9),
+            ("⚙️", "系统设置", 9),
+            ("📋", "运行日志", 10),
         ]
         
         self.sys_nav_start_index = len(self.nav_buttons)  # 记录系统按钮起始索引
@@ -420,9 +424,9 @@ class MainWindow(QMainWindow):
         welcome_frame = QFrame()
         welcome_frame.setStyleSheet(f"""
             QFrame {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 {Colors.PRIMARY}22, stop:0.5 {Colors.ACCENT}11, stop:1 {Colors.BG_TERTIARY});
-                border: 1px solid {Colors.PRIMARY}44;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 {Colors.MODULE_HOME_START}, stop:1 {Colors.MODULE_HOME_END});
+                border: none;
                 border-radius: 16px;
             }}
         """)
@@ -430,18 +434,20 @@ class MainWindow(QMainWindow):
         welcome_layout.setContentsMargins(32, 28, 32, 28)
         welcome_layout.setSpacing(12)
         
-        welcome_title = QLabel("🎯 策略开发工作台 ✨ 热重载测试版")
+        welcome_title = QLabel("🎯 策略开发工作台")
         welcome_title.setStyleSheet(f"""
-            font-size: 28px;
-            font-weight: 700;
-            color: {Colors.PRIMARY};
+            font-size: 32px;
+            font-weight: 800;
+            color: white;
+            letter-spacing: 1px;
         """)
         welcome_layout.addWidget(welcome_title)
         
-        welcome_subtitle = QLabel("从数据分析到实盘交易的一站式量化策略开发平台 | 支持热重载，代码修改无需重启")
+        welcome_subtitle = QLabel("信息获取 → 市场趋势 → 投资主线 → 候选池 → 因子构建 → 策略开发 → 回测验证 → 实盘交易")
         welcome_subtitle.setStyleSheet(f"""
             font-size: 15px;
-            color: {Colors.TEXT_TERTIARY};
+            font-weight: 500;
+            color: rgba(255,255,255,0.85);
         """)
         welcome_layout.addWidget(welcome_subtitle)
         
@@ -481,7 +487,7 @@ class MainWindow(QMainWindow):
         workflow_main_layout.setContentsMargins(24, 20, 24, 20)
         workflow_main_layout.setSpacing(16)
         
-        # 第一行：步骤 1-3
+        # 第一行：步骤 1-4（信息获取 → 市场趋势 → 投资主线 → 候选池）
         row1_layout = QHBoxLayout()
         row1_layout.setSpacing(0)
         
@@ -497,11 +503,11 @@ class MainWindow(QMainWindow):
         arrow1 = self._create_arrow()
         row1_layout.addWidget(arrow1)
         
-        # 步骤2: 投资主线
+        # 步骤2: 市场趋势（新增）
         step2 = self._create_workflow_step(
-            "2", "🔥", "投资主线",
-            "五维量化 → 综合评分 → 主线",
-            "#F59E0B", lambda: self.switch_page(2)
+            "2", "📈", "市场趋势",
+            "短/中/长期趋势识别",
+            Colors.PRIMARY, lambda: self.switch_page(2)
         )
         row1_layout.addWidget(step2)
         
@@ -509,13 +515,25 @@ class MainWindow(QMainWindow):
         arrow2 = self._create_arrow()
         row1_layout.addWidget(arrow2)
         
-        # 步骤3: 候选池
+        # 步骤3: 投资主线
         step3 = self._create_workflow_step(
-            "3", "📦", "候选池",
-            "股票+ETF → 多渠道筛选",
-            Colors.ACCENT, lambda: self.switch_page(3)
+            "3", "🔥", "投资主线",
+            "五维量化 → 综合评分 → 主线",
+            "#F59E0B", lambda: self.switch_page(3)
         )
         row1_layout.addWidget(step3)
+        
+        # 箭头
+        arrow3 = self._create_arrow()
+        row1_layout.addWidget(arrow3)
+        
+        # 步骤4: 候选池
+        step4 = self._create_workflow_step(
+            "4", "📦", "候选池",
+            "股票+ETF → 多渠道筛选",
+            Colors.ACCENT, lambda: self.switch_page(4)
+        )
+        row1_layout.addWidget(step4)
         
         workflow_main_layout.addLayout(row1_layout)
         
@@ -565,15 +583,27 @@ class MainWindow(QMainWindow):
         
         workflow_main_layout.addLayout(middle_layout)
         
-        # 第二行：步骤 6-5-4（反向排列形成U型流程）
+        # 第二行：步骤 8-7-6-5（反向排列形成U型流程）
         row2_layout = QHBoxLayout()
         row2_layout.setSpacing(0)
         
-        # 步骤7: 实盘交易
-        step7 = self._create_workflow_step(
-            "7", "🚀", "实盘交易",
+        # 步骤8: 实盘交易
+        step8 = self._create_workflow_step(
+            "8", "🚀", "实盘交易",
             "PTrade/QMT → 风控执行",
-            Colors.ERROR, lambda: self.switch_page(7)
+            Colors.ERROR, lambda: self.switch_page(8)
+        )
+        row2_layout.addWidget(step8)
+        
+        # 箭头（反向）
+        arrow7 = self._create_arrow(reverse=True)
+        row2_layout.addWidget(arrow7)
+        
+        # 步骤7: 回测验证
+        step7 = self._create_workflow_step(
+            "7", "🔄", "回测验证",
+            "本地/PTrade回测 → 报告",
+            Colors.PRIMARY, lambda: self.switch_page(7)
         )
         row2_layout.addWidget(step7)
         
@@ -581,11 +611,11 @@ class MainWindow(QMainWindow):
         arrow6 = self._create_arrow(reverse=True)
         row2_layout.addWidget(arrow6)
         
-        # 步骤6: 回测验证
+        # 步骤6: 策略开发
         step6 = self._create_workflow_step(
-            "6", "📈", "回测验证",
-            "本地/PTrade回测 → 报告",
-            Colors.PRIMARY, lambda: self.switch_page(6)
+            "6", "🛠️", "策略开发",
+            "实战策略/生成器/AI助手",
+            Colors.WARNING, lambda: self.switch_page(6)
         )
         row2_layout.addWidget(step6)
         
@@ -593,29 +623,30 @@ class MainWindow(QMainWindow):
         arrow5 = self._create_arrow(reverse=True)
         row2_layout.addWidget(arrow5)
         
-        # 步骤5: 策略开发
+        # 步骤5: 因子构建
         step5 = self._create_workflow_step(
-            "5", "🛠️", "策略开发",
-            "实战策略/生成器/AI助手",
-            Colors.WARNING, lambda: self.switch_page(5)
+            "5", "📊", "因子构建",
+            "Alpha工程 → 因子库/组合",
+            Colors.SUCCESS, lambda: self.switch_page(5)
         )
         row2_layout.addWidget(step5)
-        
-        # 箭头（反向）
-        arrow4 = self._create_arrow(reverse=True)
-        row2_layout.addWidget(arrow4)
-        
-        # 步骤4: 因子构建
-        step4 = self._create_workflow_step(
-            "4", "📊", "因子构建",
-            "Alpha工程 → 因子库/组合",
-            Colors.SUCCESS, lambda: self.switch_page(4)
-        )
-        row2_layout.addWidget(step4)
         
         workflow_main_layout.addLayout(row2_layout)
         
         layout.addWidget(workflow_frame)
+        
+        # === 集成工作流程（垂直流程） ===
+        try:
+            from gui.widgets.integrated_workflow_panel import IntegratedWorkflowPanel
+            self.integrated_workflow = IntegratedWorkflowPanel()
+            self.integrated_workflow.switch_page.connect(self.switch_page)
+            layout.addWidget(self.integrated_workflow)
+        except Exception as e:
+            logger.warning(f"集成工作流程面板加载失败: {e}")
+            # 显示占位符
+            placeholder = QLabel("⚠️ 集成工作流程面板加载失败")
+            placeholder.setStyleSheet(f"color: {Colors.WARNING}; padding: 16px;")
+            layout.addWidget(placeholder)
         
         # === 系统状态概览 ===
         status_title = QLabel("📊 系统状态")
@@ -695,8 +726,8 @@ class MainWindow(QMainWindow):
         tools_items = [
             ("📂", "文件管理系统", "策略代码、回测报告管理", Colors.PRIMARY, self.open_dashboard),
             ("📚", "A股实操手册", "量化因子体系与实战指南", Colors.ACCENT, self.open_manual),
-            ("⚙️", "系统设置", "数据源配置与系统管理", Colors.TEXT_MUTED, lambda: self.switch_page(8)),
-            ("📋", "运行日志", "查看系统运行记录", Colors.INFO, lambda: self.switch_page(9)),
+            ("⚙️", "系统设置", "数据源配置与系统管理", Colors.TEXT_MUTED, lambda: self.switch_page(9)),
+            ("📋", "运行日志", "查看系统运行记录", Colors.INFO, lambda: self.switch_page(10)),
         ]
         
         for i, (icon, title, desc, color, callback) in enumerate(tools_items):
@@ -725,7 +756,7 @@ class MainWindow(QMainWindow):
         quick_actions = [
             ("📖", "使用指南", self.open_user_guide),
             ("🔍", "扫描主线", lambda: self.switch_page(2)),
-            ("🚀", "新建策略", lambda: self.switch_page(4)),
+            ("🚀", "新建策略", lambda: self.switch_page(6)),
         ]
         
         for icon, text, callback in quick_actions:
@@ -814,8 +845,8 @@ class MainWindow(QMainWindow):
         
         # 更新导航按钮选中状态
         # 页面索引与导航按钮索引现在是一致的：
-        # 0: 工作台, 1: 信息获取, 2: 投资主线, 3: 因子构建, 4: 策略开发
-        # 5: 回测验证, 6: 实盘交易, 7: 系统设置, 8: 运行日志
+        # 0: 工作台, 1: 信息获取, 2: 市场趋势, 3: 投资主线, 4: 候选池
+        # 5: 因子构建, 6: 策略开发, 7: 回测验证, 8: 实盘交易, 9: 系统设置, 10: 运行日志
         for i, btn in enumerate(self.nav_buttons):
             btn.setChecked(i == index)
     
@@ -833,50 +864,57 @@ class MainWindow(QMainWindow):
                 from gui.widgets.data_source_panel import DataSourcePanel
                 new_widget = DataSourcePanel()
                 new_widget.open_manual.connect(self.open_manual)
-                new_widget.open_settings.connect(lambda: self.switch_page(7))
+                new_widget.open_settings.connect(lambda: self.switch_page(9))
                 self.data_source_panel = new_widget
                 
-            elif index == 2:  # 投资主线
+            elif index == 2:  # 市场趋势（新增）
+                from gui.widgets.market_trend_panel import MarketTrendPanel
+                new_widget = MarketTrendPanel()
+                # 连接趋势更新信号，供其他模块使用
+                new_widget.trend_updated.connect(self._on_trend_updated)
+                self.market_trend_panel = new_widget
+                
+            elif index == 3:  # 投资主线
                 from gui.widgets.mainline_panel import MainlinePanel
                 new_widget = MainlinePanel()
                 new_widget.generate_strategy.connect(self._on_mainline_generate_strategy)
                 new_widget.run_backtest.connect(self._on_mainline_run_backtest)
                 self.mainline_panel = new_widget
                 
-            elif index == 3:  # 候选池（独立模块）- 基于主线识别+JQData
+            elif index == 4:  # 候选池（独立模块）- 基于主线识别+JQData
                 from gui.widgets.stock_pool_panel import StockPoolPanel
                 new_widget = StockPoolPanel()
                 self.stock_pool_panel = new_widget
                 
-            elif index == 4:  # 因子构建
+            elif index == 5:  # 因子构建
                 from gui.widgets.factor_builder_panel import FactorBuilderPanel
                 new_widget = FactorBuilderPanel()
                 self.factor_panel = new_widget
                 
-            elif index == 5:  # 策略开发
+            elif index == 6:  # 策略开发
                 from gui.widgets.strategy_dev_panel import StrategyDevPanel
                 new_widget = StrategyDevPanel()
                 new_widget.run_backtest.connect(self.on_run_backtest)
                 self.strategy_dev_panel = new_widget
                 
-            elif index == 6:  # 回测验证
+            elif index == 7:  # 回测验证
                 from gui.widgets.backtest_panel import BacktestPanel
                 new_widget = BacktestPanel()
                 self.backtest_panel = new_widget
                 
-            elif index == 7:  # 实盘交易
+            elif index == 8:  # 实盘交易
                 from gui.widgets.trading_panel import TradingPanel
                 new_widget = TradingPanel()
                 self.trading_panel = new_widget
                 
-            elif index == 8:  # 系统设置
+            elif index == 9:  # 系统设置
                 from gui.widgets.system_panel import SystemPanel
                 new_widget = SystemPanel()
                 new_widget.system_started.connect(self.on_system_started)
                 new_widget.system_stopped.connect(self.on_system_stopped)
                 self.system_panel = new_widget
                 
-            elif index == 9:  # 运行日志
+            elif index == 10:  # 运行日志
                 new_widget = self.create_log_panel()
                 self.log_panel = new_widget
             
@@ -899,28 +937,43 @@ class MainWindow(QMainWindow):
         page_names = {
             0: "工作台",
             1: "信息获取",
-            2: "投资主线",
-            3: "候选池",
-            4: "因子构建",
-            5: "策略开发",
-            6: "回测验证",
-            7: "实盘交易",
-            8: "系统设置",
-            9: "运行日志",
+            2: "市场趋势",
+            3: "投资主线",
+            4: "候选池",
+            5: "因子构建",
+            6: "策略开发",
+            7: "回测验证",
+            8: "实盘交易",
+            9: "系统设置",
+            10: "运行日志",
         }
         return page_names.get(index, f"页面{index}")
     
     def _on_mainline_generate_strategy(self, data: dict):
         """从投资主线模块生成策略"""
         # 切换到策略开发页面
-        self.switch_page(4)
+        self.switch_page(6)
         self.log_message("📝 从投资主线生成策略...")
     
     def _on_mainline_run_backtest(self, data: dict):
         """从投资主线模块运行回测"""
         # 切换到回测验证页面
-        self.switch_page(5)
+        self.switch_page(7)
         self.log_message("📈 从投资主线运行回测...")
+    
+    def _on_trend_updated(self, trend_data: dict):
+        """处理市场趋势更新"""
+        try:
+            phase = trend_data.get("market_phase", "未知")
+            score = trend_data.get("composite_score", 0)
+            self.log_message(f"📈 市场趋势更新: {phase} (得分: {score:+.0f})")
+            
+            # 可以将趋势信息传递给其他模块
+            if hasattr(self, 'factor_panel') and self.factor_panel:
+                # 通知因子模块当前市场趋势
+                pass
+        except Exception as e:
+            logger.warning(f"处理趋势更新失败: {e}")
     
     def on_run_backtest(self, strategy_path: str, params: dict):
         """
@@ -1184,7 +1237,7 @@ class MainWindow(QMainWindow):
     
     def start_system(self):
         """启动系统"""
-        self.switch_page(6)  # 切换到系统设置页面
+        self.switch_page(9)  # 切换到系统设置页面
         self.system_panel.start_system()
     
     def sync_data(self):

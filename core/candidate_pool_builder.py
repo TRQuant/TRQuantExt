@@ -15,10 +15,29 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any
 from dataclasses import dataclass, field, asdict
 import pandas as pd
+import numpy as np
 from pathlib import Path
 import json
 
 logger = logging.getLogger(__name__)
+
+
+def _convert_numpy_types(obj: Any) -> Any:
+    """递归转换numpy类型为Python原生类型（MongoDB兼容）"""
+    if isinstance(obj, dict):
+        return {k: _convert_numpy_types(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_convert_numpy_types(item) for item in obj]
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif isinstance(obj, (np.integer, np.int64, np.int32)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64, np.float32)):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    else:
+        return obj
 
 # 尝试导入JQData
 try:
@@ -82,8 +101,8 @@ class CandidatePool:
     data_date: str = ''         # 数据日期（用于历史模式）
     
     def to_dict(self) -> Dict:
-        """转换为字典"""
-        return {
+        """转换为字典（MongoDB兼容，自动转换numpy类型）"""
+        data = {
             'pool_id': self.pool_id,
             'mainline_name': self.mainline_name,
             'mainline_type': self.mainline_type,
@@ -94,6 +113,7 @@ class CandidatePool:
             'data_date': self.data_date,
             'stocks': [asdict(stock) for stock in self.stocks]
         }
+        return _convert_numpy_types(data)
 
 
 class CandidatePoolBuilder:
@@ -477,12 +497,12 @@ class CandidatePoolBuilder:
             for i in range(0, len(stock_codes), batch_size):
                 batch = stock_codes[i:i+batch_size]
                 try:
-                    # 查询财务指标
+                    # 查询财务指标 (使用正确的JQData字段名)
                     q = query(
                         valuation.code,
                         indicator.roe,  # ROE
-                        indicator.net_profit_growth_rate,  # 净利润同比增长率
-                        indicator.operating_revenue_growth_rate  # 营收同比增长率
+                        indicator.inc_net_profit_year_on_year,  # 净利润同比增长率
+                        indicator.inc_revenue_year_on_year  # 营收同比增长率
                     ).filter(
                         valuation.code.in_(batch)
                     )
@@ -494,8 +514,8 @@ class CandidatePoolBuilder:
                             code = row['code']
                             fundamental_data[code] = {
                                 'roe': row.get('roe', 0),
-                                'net_profit_growth': row.get('net_profit_growth_rate', 0),
-                                'revenue_growth': row.get('operating_revenue_growth_rate', 0)
+                                'net_profit_growth': row.get('inc_net_profit_year_on_year', 0),
+                                'revenue_growth': row.get('inc_revenue_year_on_year', 0)
                             }
                 except Exception as e:
                     logger.warning(f"获取财务数据失败（批次 {i//batch_size + 1}）: {e}")
@@ -597,7 +617,7 @@ class CandidatePoolBuilder:
         """保存到缓存（MongoDB和文件）"""
         try:
             # 保存到MongoDB
-            if self.db:
+            if self.db is not None:
                 collection = self.db.candidate_pools
                 collection.replace_one(
                     {'pool_id': pool.pool_id},
@@ -629,7 +649,7 @@ class CandidatePoolBuilder:
             pool_id = f"mainline_{mainline_name}_{date_str}"
             
             # 从MongoDB加载
-            if self.db:
+            if self.db is not None:
                 collection = self.db.candidate_pools
                 doc = collection.find_one({'pool_id': pool_id})
                 if doc:

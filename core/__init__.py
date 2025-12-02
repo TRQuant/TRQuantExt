@@ -8,9 +8,12 @@
 
 from .base_market import BaseMarket, MarketType
 from .base_mainline import BaseMainlineEngine
+from .workflow_orchestrator import WorkflowOrchestrator, get_workflow_orchestrator
 
 __all__ = [
     'BaseMarket',
     'MarketType',
     'BaseMainlineEngine',
+    'WorkflowOrchestrator',
+    'get_workflow_orchestrator',
 ]

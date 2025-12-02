@@ -73,9 +73,13 @@ class PriceMomentumFactor(BaseFactor):
             if isinstance(date, str):
                 date = datetime.strptime(date, '%Y-%m-%d')
             
+            # 【支持动态调整lookback_days以适应试用账户】
+            lookback_days = kwargs.get('lookback_days', self.lookback_days)
+            skip_days = kwargs.get('skip_days', self.skip_days)
+            
             # 获取历史价格
             # 需要lookback_days + skip_days的数据
-            total_days = self.lookback_days + self.skip_days + 10  # 多取一些以防节假日
+            total_days = lookback_days + skip_days + 10  # 多取一些以防节假日
             
             prices = jq.get_price(
                 stocks,
@@ -94,18 +98,18 @@ class PriceMomentumFactor(BaseFactor):
             for stock in stocks:
                 stock_prices = prices[prices['code'] == stock]['close']
                 
-                if len(stock_prices) < self.lookback_days:
+                if len(stock_prices) < lookback_days:
                     momentum_dict[stock] = np.nan
                     continue
                 
                 # 跳过最近skip_days天
-                if self.skip_days > 0:
-                    current_price = stock_prices.iloc[-(self.skip_days + 1)]
+                if skip_days > 0:
+                    current_price = stock_prices.iloc[-(skip_days + 1)]
                 else:
                     current_price = stock_prices.iloc[-1]
                 
                 # lookback_days之前的价格
-                past_price = stock_prices.iloc[-(self.lookback_days + self.skip_days)]
+                past_price = stock_prices.iloc[-(lookback_days + skip_days)]
                 
                 if past_price > 0:
                     momentum_dict[stock] = (current_price - past_price) / past_price
@@ -117,7 +121,7 @@ class PriceMomentumFactor(BaseFactor):
             # 处理极端值
             result = result.clip(-2, 5)  # 限制在-200%到500%
             
-            logger.info(f"价格动量因子计算完成: 有效值 {result.notna().sum()}/{len(stocks)}")
+            logger.info(f"价格动量因子计算完成(lookback={lookback_days}): 有效值 {result.notna().sum()}/{len(stocks)}")
             return result
             
         except Exception as e:
@@ -223,11 +227,14 @@ class ReversalFactor(BaseFactor):
             if isinstance(date, str):
                 date = datetime.strptime(date, '%Y-%m-%d')
             
+            # 支持动态调整lookback_days
+            lookback_days = kwargs.get('lookback_days', self.lookback_days)
+            
             # 获取历史价格
             prices = jq.get_price(
                 stocks,
                 end_date=date,
-                count=self.lookback_days + 5,
+                count=lookback_days + 5,
                 fields=['close'],
                 panel=False
             )
@@ -241,12 +248,12 @@ class ReversalFactor(BaseFactor):
             for stock in stocks:
                 stock_prices = prices[prices['code'] == stock]['close']
                 
-                if len(stock_prices) < self.lookback_days + 1:
+                if len(stock_prices) < lookback_days + 1:
                     reversal_dict[stock] = np.nan
                     continue
                 
                 current_price = stock_prices.iloc[-1]
-                past_price = stock_prices.iloc[-(self.lookback_days + 1)]
+                past_price = stock_prices.iloc[-(lookback_days + 1)]
                 
                 if past_price > 0:
                     # 取负值：下跌越多，反转因子越大
@@ -259,7 +266,7 @@ class ReversalFactor(BaseFactor):
             # 处理极端值
             result = result.clip(-0.5, 0.5)
             
-            logger.info(f"反转因子计算完成: 有效值 {result.notna().sum()}/{len(stocks)}")
+            logger.info(f"反转因子计算完成(lookback={lookback_days}): 有效值 {result.notna().sum()}/{len(stocks)}")
             return result
             
         except Exception as e:
@@ -363,11 +370,14 @@ class RelativeStrengthFactor(BaseFactor):
             if isinstance(date, str):
                 date = datetime.strptime(date, '%Y-%m-%d')
             
+            # 支持动态调整lookback_days
+            lookback_days = kwargs.get('lookback_days', self.lookback_days)
+            
             # 获取股票价格
             stock_prices = jq.get_price(
                 stocks,
                 end_date=date,
-                count=self.lookback_days + 5,
+                count=lookback_days + 5,
                 fields=['close'],
                 panel=False
             )
@@ -376,7 +386,7 @@ class RelativeStrengthFactor(BaseFactor):
             benchmark_prices = jq.get_price(
                 self.benchmark,
                 end_date=date,
-                count=self.lookback_days + 5,
+                count=lookback_days + 5,
                 fields=['close']
             )
             
@@ -395,7 +405,7 @@ class RelativeStrengthFactor(BaseFactor):
             for stock in stocks:
                 sp = stock_prices[stock_prices['code'] == stock]['close']
                 
-                if len(sp) < self.lookback_days:
+                if len(sp) < lookback_days:
                     rs_dict[stock] = np.nan
                     continue
                 
@@ -407,7 +417,7 @@ class RelativeStrengthFactor(BaseFactor):
             # 处理极端值
             result = result.clip(-1, 2)
             
-            logger.info(f"相对强弱因子计算完成: 有效值 {result.notna().sum()}/{len(stocks)}")
+            logger.info(f"相对强弱因子计算完成(lookback={lookback_days}): 有效值 {result.notna().sum()}/{len(stocks)}")
             return result
             
         except Exception as e:

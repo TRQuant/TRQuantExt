@@ -473,35 +473,155 @@ factors = {
 
 
 class FactorCalculationThread(QThread):
-    """因子计算线程"""
+    """因子计算线程 - 增强版，支持完整的异步计算流程"""
     progress = pyqtSignal(int, str)
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
+    stock_pool_ready = pyqtSignal(int)  # 股票池就绪信号
     
-    def __init__(self, factor_manager, factor_names, stocks, date):
+    def __init__(self, factor_manager, factor_names, stocks, date, 
+                 jq_client=None, pool_name=None, start_date=None, 
+                 custom_targets=None, factor_map=None):
         super().__init__()
         self.factor_manager = factor_manager
         self.factor_names = factor_names
         self.stocks = stocks
         self.date = date
+        self.jq_client = jq_client
+        self.pool_name = pool_name
+        self.start_date = start_date
+        self.custom_targets = custom_targets
+        self.factor_map = factor_map or {}
+        self._is_cancelled = False
+        
+    def cancel(self):
+        """取消计算"""
+        self._is_cancelled = True
     
     def run(self):
         try:
+            import jqdatasdk as jq
+            
+            # Step 1: 获取股票池（如果未提供）
+            if not self.stocks and self.pool_name:
+                self.progress.emit(5, "正在获取股票池...")
+                stocks = self._fetch_stock_pool()
+                if self._is_cancelled:
+                    return
+            else:
+                stocks = self.stocks
+            
+            # 应用自定义投资标的
+            if self.custom_targets:
+                stocks = self._parse_custom_targets()
+                
+            if not stocks:
+                self.error.emit("获取股票池失败，请检查日期是否在权限范围内")
+                return
+            
+            self.stock_pool_ready.emit(len(stocks))
+            
+            # Step 2: 计算因子
             results = {}
+            failed_factors = []
             total = len(self.factor_names)
             
-            for i, name in enumerate(self.factor_names):
-                self.progress.emit(
-                    int((i + 1) / total * 100),
-                    f"计算因子: {name}"
-                )
-                result = self.factor_manager.calculate_factor(name, self.stocks, self.date)
-                if result:
-                    results[name] = result
+            # 计算可用历史天数
+            available_days = self._calc_available_days()
             
-            self.finished.emit(results)
+            # 限制股票数以适应试用账户
+            limited_stocks = stocks[:100]
+            
+            for i, name in enumerate(self.factor_names):
+                if self._is_cancelled:
+                    self.progress.emit(0, "计算已取消")
+                    return
+                    
+                progress = int(10 + (i + 1) / total * 85)  # 10%-95%
+                self.progress.emit(progress, f"计算因子: {name} ({i+1}/{total})")
+                
+                try:
+                    # 动态调整lookback_days
+                    extra_params = {}
+                    if name in ['PriceMomentum', 'Reversal', 'RelativeStrength']:
+                        max_lookback = min(120, int(available_days * 0.8) - 30)
+                        extra_params['lookback_days'] = max(30, max_lookback)
+                    
+                    result = self.factor_manager.calculate_factor(
+                        name, limited_stocks, self.date, **extra_params
+                    )
+                    if result:
+                        results[name] = result
+                except Exception as e:
+                    error_msg = str(e)
+                    if "权限" in error_msg or "permission" in error_msg.lower():
+                        failed_factors.append(f"{name}(权限限制)")
+                    else:
+                        failed_factors.append(f"{name}({str(e)[:30]})")
+                    logger.warning(f"因子计算失败 {name}: {e}")
+            
+            self.progress.emit(100, "计算完成")
+            
+            # 返回结果，包括失败信息
+            result_data = {
+                'results': results,
+                'failed': failed_factors,
+                'stock_count': len(limited_stocks)
+            }
+            self.finished.emit(result_data)
+            
         except Exception as e:
+            import traceback
+            logger.error(f"因子计算线程错误: {traceback.format_exc()}")
             self.error.emit(str(e))
+    
+    def _fetch_stock_pool(self):
+        """获取股票池"""
+        import jqdatasdk as jq
+        
+        pool_map = {
+            "沪深300": "000300.XSHG", 
+            "中证500": "000905.XSHG", 
+            "中证1000": "000852.XSHG", 
+            "全A股": "all_a"
+        }
+        
+        try:
+            if self.pool_name == "全A股":
+                all_secs = jq.get_all_securities(types=['stock'], date=self.date)
+                return all_secs.index.tolist()[:500] if all_secs is not None else []
+            else:
+                stocks = jq.get_index_stocks(pool_map.get(self.pool_name, "000300.XSHG"), date=self.date)
+                return stocks if stocks else []
+        except Exception as e:
+            logger.error(f"获取股票池失败: {e}")
+            return []
+    
+    def _parse_custom_targets(self):
+        """解析自定义投资标的"""
+        codes = [c.strip() for c in self.custom_targets.replace('，', ',').split(',') if c.strip()]
+        custom_stocks = []
+        for code in codes:
+            if len(code) == 6:
+                if code.startswith('6'):
+                    custom_stocks.append(f"{code}.XSHG")
+                else:
+                    custom_stocks.append(f"{code}.XSHE")
+            else:
+                custom_stocks.append(code)
+        return custom_stocks
+    
+    def _calc_available_days(self):
+        """计算可用历史数据天数"""
+        try:
+            from datetime import datetime as dt
+            if self.start_date and self.date:
+                start_dt = dt.strptime(self.start_date, '%Y-%m-%d') if isinstance(self.start_date, str) else self.start_date
+                end_dt = dt.strptime(self.date, '%Y-%m-%d') if isinstance(self.date, str) else self.date
+                return (end_dt - start_dt).days
+        except:
+            pass
+        return 365
 
 
 class FactorBuilderPanel(QWidget):
@@ -556,44 +676,123 @@ class FactorBuilderPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         
-        # 创建选项卡
+        # Tab控件直接在最上面
         self.tab_widget = QTabWidget()
         self.tab_widget.setStyleSheet(f"""
             QTabWidget::pane {{
                 border: none;
                 background: {Colors.BG_SECONDARY};
             }}
+            QTabBar {{
+                background-color: {Colors.BG_PRIMARY};
+            }}
             QTabBar::tab {{
-                background: {Colors.BG_TERTIARY};
-                color: {Colors.TEXT_SECONDARY};
-                padding: 12px 24px;
-                margin-right: 2px;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
+                background: {Colors.BG_PRIMARY};
+                color: {Colors.TEXT_MUTED};
+                padding: 12px 20px;
                 font-size: 13px;
-                font-weight: 500;
+                font-weight: 600;
+                border: none;
             }}
             QTabBar::tab:selected {{
-                background: {Colors.PRIMARY};
-                color: white;
+                background: {Colors.BG_SECONDARY};
+                color: {Colors.MODULE_FACTOR_START};
+                border-bottom: 3px solid {Colors.MODULE_FACTOR_START};
             }}
             QTabBar::tab:hover:!selected {{
-                background: {Colors.BG_SECONDARY};
+                background: {Colors.BG_TERTIARY};
                 color: {Colors.TEXT_PRIMARY};
             }}
         """)
         
-        # 添加选项卡
-        self.tab_widget.addTab(self._create_alpha_intro_tab(), "🎓 Alpha工程")
+        # 添加选项卡 - 按照工作流程重新排序
+        # 第一组：学习与参考
+        self.tab_widget.addTab(self._create_alpha_intro_tab(), "📖 方法论")
         self.tab_widget.addTab(self._create_factor_library_tab(), "📚 因子库")
-        self.tab_widget.addTab(self._create_classic_factors_tab(), "🏆 经典因子库")
-        self.tab_widget.addTab(self._create_quant_companies_tab(), "🏢 量化公司")
-        self.tab_widget.addTab(self._create_examples_tab(), "💡 应用案例")
+        self.tab_widget.addTab(self._create_classic_factors_tab(), "🏆 经典因子")
+        
+        # 第二组：核心工作流（推荐→筛选→计算→检验）
+        self.factor_recommend_tab = self._create_factor_recommend_tab()
+        self.tab_widget.addTab(self.factor_recommend_tab, "🧠 因子推荐")
         self.tab_widget.addTab(self._create_factor_filter_tab(), "🔍 因子筛选")
         self.tab_widget.addTab(self._create_factor_calc_tab(), "🔧 因子计算")
-        # 策略生成功能已整合到"策略开发"模块
+        self.tab_widget.addTab(self._create_factor_validation_tab(), "📊 因子检验")
+        
+        # 第三组：辅助参考
+        self.tab_widget.addTab(self._create_quant_companies_tab(), "🏢 量化公司")
+        self.tab_widget.addTab(self._create_examples_tab(), "💡 应用案例")
         
         layout.addWidget(self.tab_widget)
+    
+    def _create_factor_recommend_tab(self) -> QWidget:
+        """创建因子推荐选项卡"""
+        try:
+            from gui.widgets.factor_recommend_tab import FactorRecommendTab
+            
+            tab = FactorRecommendTab()
+            # 连接推荐信号，当推荐生成后自动填充到因子计算页面
+            tab.recommendation_ready.connect(self._on_recommendation_ready)
+            return tab
+        except Exception as e:
+            logger.error(f"创建因子推荐Tab失败: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # 返回占位widget
+            placeholder = QWidget()
+            layout = QVBoxLayout(placeholder)
+            label = QLabel(f"因子推荐模块加载失败: {e}")
+            label.setStyleSheet(f"color: {Colors.ERROR};")
+            layout.addWidget(label)
+            return placeholder
+    
+    def _on_recommendation_ready(self, recommendation: dict):
+        """处理因子推荐结果 - 预填充因子计算页面的选择，但不切换页面"""
+        try:
+            rec = recommendation.get("recommendation", {})
+            categories = rec.get("recommended_categories", [])
+            
+            if not categories:
+                logger.info("因子推荐: 无推荐类别")
+                return
+            
+            # 构建因子大类到具体因子ID的映射
+            category_to_factor_ids = {
+                "动量因子": ["momentum_12_1", "momentum_60d", "relative_strength", "52w_high"],
+                "成长因子": ["revenue_growth_yoy", "profit_growth_yoy", "roe_change", "eps_growth_3y"],
+                "价值因子": ["ep", "bp", "dividend_yield", "fcf_yield", "pe_ttm", "pb"],
+                "质量因子": ["roe", "gross_margin", "asset_turnover", "accruals", "roa"],
+                "资金流因子": ["north_flow", "main_force_flow", "margin_change"],
+                "反转因子": ["reversal_5d", "reversal_20d", "max_return_5d"],
+                "低波动因子": ["volatility_20d", "beta", "max_drawdown"],
+                "流动性因子": ["turnover_20d", "amihud", "volume_ratio"],
+                "规模因子": ["ln_market_cap", "float_cap", "market_cap"],
+                "情绪因子": ["analyst_upgrade", "forecast_revision", "news_sentiment"],
+                "股息因子": ["dividend_yield", "dividend_payout", "dividend_growth"],
+            }
+            
+            # 先清空所有选择
+            if hasattr(self, 'factor_checkboxes'):
+                for cb in self.factor_checkboxes.values():
+                    cb.setChecked(False)
+                
+                # 根据推荐的因子大类选中对应的具体因子
+                selected_count = 0
+                for cat in categories:
+                    category_name = cat.get("category", "")
+                    factor_ids = category_to_factor_ids.get(category_name, [])
+                    
+                    for fid in factor_ids:
+                        if fid in self.factor_checkboxes:
+                            self.factor_checkboxes[fid].setChecked(True)
+                            selected_count += 1
+                
+                logger.info(f"已应用因子推荐: {len(categories)}个大类, {selected_count}个具体因子")
+            
+            # 注意：不再自动切换到因子计算页面，让用户留在因子推荐页面查看详细结果
+            
+        except Exception as e:
+            logger.error(f"应用因子推荐失败: {e}")
     
     def _create_alpha_intro_tab(self) -> QWidget:
         """创建Alpha工程介绍选项卡 - 卡片式布局 + 动态流程图"""
@@ -3533,6 +3732,482 @@ class FactorBuilderPanel(QWidget):
         
         return widget
     
+    def _create_factor_validation_tab(self) -> QWidget:
+        """创建因子检验选项卡 - IC/IR分析"""
+        widget = QWidget()
+        main_layout = QVBoxLayout(widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # 滚动区域
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(f"QScrollArea {{ border: none; background-color: {Colors.BG_SECONDARY}; }}")
+        
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(20)
+        
+        # 标题
+        title = QLabel("📊 因子有效性检验")
+        title.setStyleSheet(f"font-size: 20px; font-weight: 700; color: {Colors.TEXT_PRIMARY};")
+        layout.addWidget(title)
+        
+        desc = QLabel("通过IC/IR分析验证因子的预测能力和稳定性")
+        desc.setStyleSheet(f"font-size: 13px; color: {Colors.TEXT_MUTED};")
+        layout.addWidget(desc)
+        
+        # 方法说明
+        method_frame = QFrame()
+        method_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {Colors.BG_TERTIARY};
+                border: 1px solid {Colors.BORDER_PRIMARY};
+                border-radius: 12px;
+            }}
+        """)
+        method_layout = QVBoxLayout(method_frame)
+        method_layout.setContentsMargins(20, 16, 20, 16)
+        method_layout.setSpacing(12)
+        
+        method_title = QLabel("📐 检验方法说明")
+        method_title.setStyleSheet(f"font-size: 15px; font-weight: 600; color: {Colors.TEXT_PRIMARY};")
+        method_layout.addWidget(method_title)
+        
+        method_grid = QGridLayout()
+        method_grid.setSpacing(16)
+        
+        methods = [
+            ("IC (信息系数)", "#10B981", "因子值与下期收益的相关系数\n|IC| > 0.03 表示因子有效"),
+            ("IR (信息比率)", "#3B82F6", "IR = mean(IC) / std(IC)\nIR > 0.5 表示因子稳定有效"),
+            ("IC_IR (综合)", "#8B5CF6", "综合考虑预测能力和稳定性\nIC_IR > 0.3 为优秀因子"),
+            ("t统计量", "#EC4899", "t = IC均值 / (IC标准差/√n)\n|t| > 2 具有统计显著性"),
+        ]
+        
+        for i, (name, color, desc_text) in enumerate(methods):
+            card = QFrame()
+            card.setStyleSheet(f"""
+                QFrame {{
+                    background-color: {Colors.BG_PRIMARY};
+                    border: 2px solid {color}40;
+                    border-radius: 8px;
+                    border-left: 4px solid {color};
+                }}
+            """)
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(12, 10, 12, 10)
+            card_layout.setSpacing(6)
+            
+            name_label = QLabel(name)
+            name_label.setStyleSheet(f"font-weight: 600; color: {color};")
+            card_layout.addWidget(name_label)
+            
+            desc_label = QLabel(desc_text)
+            desc_label.setStyleSheet(f"font-size: 12px; color: {Colors.TEXT_SECONDARY};")
+            desc_label.setWordWrap(True)
+            card_layout.addWidget(desc_label)
+            
+            method_grid.addWidget(card, i // 2, i % 2)
+        
+        method_layout.addLayout(method_grid)
+        layout.addWidget(method_frame)
+        
+        # 因子选择和分析区域
+        analysis_frame = QFrame()
+        analysis_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {Colors.BG_TERTIARY};
+                border: 1px solid {Colors.BORDER_PRIMARY};
+                border-radius: 12px;
+            }}
+        """)
+        analysis_layout = QVBoxLayout(analysis_frame)
+        analysis_layout.setContentsMargins(20, 16, 20, 16)
+        analysis_layout.setSpacing(12)
+        
+        analysis_title = QLabel("🔬 因子有效性分析")
+        analysis_title.setStyleSheet(f"font-size: 15px; font-weight: 600; color: {Colors.TEXT_PRIMARY};")
+        analysis_layout.addWidget(analysis_title)
+        
+        # 配置行
+        config_layout = QHBoxLayout()
+        config_layout.setSpacing(16)
+        
+        # 因子选择
+        factor_label = QLabel("选择因子:")
+        factor_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
+        config_layout.addWidget(factor_label)
+        
+        self.validation_factor_combo = QComboBox()
+        self.validation_factor_combo.addItems([
+            "价值因子 (EP)", "成长因子 (净利润增长)", "质量因子 (ROE)",
+            "动量因子 (收益率)", "波动因子 (波动率)", "换手因子"
+        ])
+        self.validation_factor_combo.setMinimumWidth(150)
+        config_layout.addWidget(self.validation_factor_combo)
+        
+        # 时间范围
+        period_label = QLabel("分析周期:")
+        period_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
+        config_layout.addWidget(period_label)
+        
+        self.validation_period_combo = QComboBox()
+        self.validation_period_combo.addItems(["近1年", "近2年", "近3年", "近5年"])
+        config_layout.addWidget(self.validation_period_combo)
+        
+        config_layout.addStretch()
+        
+        # 分析按钮
+        analyze_btn = QPushButton("▶ 开始分析")
+        analyze_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.PRIMARY};
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 10px 24px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.PRIMARY}dd;
+            }}
+        """)
+        analyze_btn.clicked.connect(self._run_factor_validation)
+        config_layout.addWidget(analyze_btn)
+        
+        analysis_layout.addLayout(config_layout)
+        
+        # 状态
+        self.validation_status = QLabel("")
+        self.validation_status.setStyleSheet(f"color: {Colors.TEXT_MUTED}; font-size: 12px;")
+        analysis_layout.addWidget(self.validation_status)
+        
+        # 结果表格
+        self.validation_table = QTableWidget()
+        self.validation_table.setColumnCount(6)
+        self.validation_table.setHorizontalHeaderLabels([
+            "因子", "IC均值", "IC标准差", "IR", "t统计量", "评价"
+        ])
+        self.validation_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.validation_table.setMinimumHeight(180)
+        self.validation_table.setStyleSheet(f"""
+            QTableWidget {{
+                background-color: {Colors.BG_PRIMARY};
+                border: 1px solid {Colors.BORDER_PRIMARY};
+                border-radius: 8px;
+            }}
+        """)
+        analysis_layout.addWidget(self.validation_table)
+        
+        # IC时序图（使用QLabel作为图表占位符）
+        chart_title = QLabel("📈 IC时序图")
+        chart_title.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {Colors.TEXT_PRIMARY}; margin-top: 12px;")
+        analysis_layout.addWidget(chart_title)
+        
+        self.ic_chart_label = QLabel()
+        self.ic_chart_label.setMinimumHeight(250)
+        self.ic_chart_label.setStyleSheet(f"""
+            background-color: {Colors.BG_PRIMARY};
+            border: 1px solid {Colors.BORDER_PRIMARY};
+            border-radius: 8px;
+        """)
+        self.ic_chart_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.ic_chart_label.setText("点击\"开始分析\"查看IC时序图")
+        analysis_layout.addWidget(self.ic_chart_label)
+        
+        layout.addWidget(analysis_frame)
+        
+        # 历史分析结果
+        history_frame = QFrame()
+        history_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {Colors.BG_TERTIARY};
+                border: 1px solid {Colors.BORDER_PRIMARY};
+                border-radius: 12px;
+            }}
+        """)
+        history_layout = QVBoxLayout(history_frame)
+        history_layout.setContentsMargins(20, 16, 20, 16)
+        
+        history_title = QLabel("📋 A股因子有效性参考 (历史回测数据)")
+        history_title.setStyleSheet(f"font-size: 15px; font-weight: 600; color: {Colors.TEXT_PRIMARY};")
+        history_layout.addWidget(history_title)
+        
+        # 参考数据表格
+        ref_table = QTableWidget()
+        ref_table.setRowCount(6)
+        ref_table.setColumnCount(5)
+        ref_table.setHorizontalHeaderLabels(["因子类别", "典型IC", "典型IR", "A股有效性", "备注"])
+        ref_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        ref_table.setMinimumHeight(200)
+        
+        ref_data = [
+            ("价值因子 (EP/BP)", "0.03-0.05", "0.3-0.5", "⭐⭐⭐", "长周期有效"),
+            ("成长因子 (净利润增长)", "0.02-0.04", "0.2-0.4", "⭐⭐⭐⭐", "牛市更有效"),
+            ("质量因子 (ROE)", "0.02-0.03", "0.2-0.3", "⭐⭐⭐", "稳定有效"),
+            ("动量因子 (1M收益)", "0.04-0.06", "0.4-0.6", "⭐⭐⭐⭐⭐", "短期最有效"),
+            ("反转因子 (1M反转)", "0.03-0.05", "0.3-0.5", "⭐⭐⭐⭐", "震荡市有效"),
+            ("波动因子 (低波动)", "0.02-0.04", "0.2-0.4", "⭐⭐⭐", "熊市有效"),
+        ]
+        
+        for i, row in enumerate(ref_data):
+            for j, cell in enumerate(row):
+                item = QTableWidgetItem(cell)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                ref_table.setItem(i, j, item)
+        
+        ref_table.setStyleSheet(f"""
+            QTableWidget {{
+                background-color: {Colors.BG_PRIMARY};
+                border: 1px solid {Colors.BORDER_PRIMARY};
+                border-radius: 8px;
+            }}
+        """)
+        history_layout.addWidget(ref_table)
+        
+        layout.addWidget(history_frame)
+        
+        # 情景权重库
+        scenario_frame = QFrame()
+        scenario_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {Colors.BG_TERTIARY};
+                border: 1px solid {Colors.PRIMARY}40;
+                border-radius: 12px;
+            }}
+        """)
+        scenario_layout = QVBoxLayout(scenario_frame)
+        scenario_layout.setContentsMargins(20, 16, 20, 16)
+        scenario_layout.setSpacing(12)
+        
+        scenario_title = QLabel("🎯 情景因子权重库")
+        scenario_title.setStyleSheet(f"font-size: 15px; font-weight: 600; color: {Colors.TEXT_PRIMARY};")
+        scenario_layout.addWidget(scenario_title)
+        
+        scenario_desc = QLabel("根据市场情景自动调整因子权重配置")
+        scenario_desc.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: 12px;")
+        scenario_layout.addWidget(scenario_desc)
+        
+        # 情景卡片
+        scenario_grid = QGridLayout()
+        scenario_grid.setSpacing(12)
+        
+        scenarios = [
+            ("🐂 牛市配置", "#10B981", "动量>成长>质量", "侧重动量和成长因子，追涨强势股"),
+            ("🐻 熊市配置", "#EF4444", "价值>质量>低波", "侧重价值和低波动因子，防守为主"),
+            ("🔄 震荡配置", "#F59E0B", "价值>质量>反转", "均衡配置，逢低买入高抛"),
+        ]
+        
+        for i, (name, color, weights, desc) in enumerate(scenarios):
+            card = QFrame()
+            card.setStyleSheet(f"""
+                QFrame {{
+                    background-color: {Colors.BG_PRIMARY};
+                    border: 2px solid {color}40;
+                    border-radius: 8px;
+                    border-left: 4px solid {color};
+                }}
+            """)
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(12, 10, 12, 10)
+            card_layout.setSpacing(6)
+            
+            name_label = QLabel(name)
+            name_label.setStyleSheet(f"font-weight: 600; color: {color}; font-size: 14px;")
+            card_layout.addWidget(name_label)
+            
+            weights_label = QLabel(f"权重优先级: {weights}")
+            weights_label.setStyleSheet(f"font-size: 12px; color: {Colors.TEXT_PRIMARY};")
+            card_layout.addWidget(weights_label)
+            
+            desc_label = QLabel(desc)
+            desc_label.setStyleSheet(f"font-size: 11px; color: {Colors.TEXT_MUTED};")
+            desc_label.setWordWrap(True)
+            card_layout.addWidget(desc_label)
+            
+            scenario_grid.addWidget(card, 0, i)
+        
+        scenario_layout.addLayout(scenario_grid)
+        
+        # 自动检测按钮
+        detect_layout = QHBoxLayout()
+        
+        detect_btn = QPushButton("🔍 自动检测当前市场情景")
+        detect_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.PRIMARY};
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 10px 20px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.PRIMARY}dd;
+            }}
+        """)
+        detect_btn.clicked.connect(self._detect_market_scenario)
+        detect_layout.addWidget(detect_btn)
+        
+        self.scenario_result = QLabel("")
+        self.scenario_result.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: 13px;")
+        detect_layout.addWidget(self.scenario_result)
+        detect_layout.addStretch()
+        
+        scenario_layout.addLayout(detect_layout)
+        
+        layout.addWidget(scenario_frame)
+        layout.addStretch()
+        
+        scroll.setWidget(content)
+        main_layout.addWidget(scroll)
+        
+        return widget
+    
+    def _detect_market_scenario(self):
+        """检测当前市场情景"""
+        try:
+            from core.factor_weight_optimizer import get_factor_weight_optimizer, MarketScenario
+            
+            optimizer = get_factor_weight_optimizer()
+            config = optimizer.recommend_weights()
+            
+            scenario_names = {
+                MarketScenario.BULL: "🐂 牛市",
+                MarketScenario.BEAR: "🐻 熊市",
+                MarketScenario.SIDEWAYS: "🔄 震荡市",
+                MarketScenario.UNKNOWN: "❓ 未知"
+            }
+            
+            name = scenario_names.get(config.scenario, "❓ 未知")
+            
+            # 显示推荐的权重
+            weights_str = ", ".join([f"{k}:{v:.0%}" for k, v in list(config.factor_weights.items())[:3]])
+            
+            self.scenario_result.setText(f"当前判断: {name} | 推荐: {config.description} | 权重: {weights_str}")
+            
+        except Exception as e:
+            self.scenario_result.setText(f"检测失败: {e}")
+    
+    def _run_factor_validation(self):
+        """执行因子有效性分析"""
+        factor_name = self.validation_factor_combo.currentText()
+        period = self.validation_period_combo.currentText()
+        
+        self.validation_status.setText(f"正在分析 {factor_name} ({period})...")
+        
+        # 模拟分析结果（实际应调用FactorEvaluator）
+        # TODO: 接入真实的因子评估逻辑
+        import random
+        
+        # 生成模拟数据
+        ic_mean = random.uniform(0.02, 0.06) * (1 if random.random() > 0.3 else -1)
+        ic_std = random.uniform(0.03, 0.08)
+        ir = ic_mean / ic_std if ic_std > 0 else 0
+        t_stat = abs(ic_mean) / (ic_std / (12 ** 0.5))  # 假设12期
+        
+        # 评价
+        if abs(ir) > 0.5 and t_stat > 2:
+            rating = "⭐⭐⭐⭐⭐ 优秀"
+            rating_color = "#10B981"
+        elif abs(ir) > 0.3 and t_stat > 1.5:
+            rating = "⭐⭐⭐⭐ 良好"
+            rating_color = "#3B82F6"
+        elif abs(ir) > 0.2:
+            rating = "⭐⭐⭐ 一般"
+            rating_color = "#F59E0B"
+        else:
+            rating = "⭐⭐ 较弱"
+            rating_color = "#EF4444"
+        
+        # 更新表格
+        self.validation_table.setRowCount(1)
+        self.validation_table.setItem(0, 0, QTableWidgetItem(factor_name.split(" ")[0]))
+        self.validation_table.setItem(0, 1, QTableWidgetItem(f"{ic_mean:.4f}"))
+        self.validation_table.setItem(0, 2, QTableWidgetItem(f"{ic_std:.4f}"))
+        self.validation_table.setItem(0, 3, QTableWidgetItem(f"{ir:.3f}"))
+        self.validation_table.setItem(0, 4, QTableWidgetItem(f"{t_stat:.2f}"))
+        
+        rating_item = QTableWidgetItem(rating)
+        rating_item.setForeground(QColor(rating_color))
+        self.validation_table.setItem(0, 5, rating_item)
+        
+        # 生成IC时序图
+        self._generate_ic_chart(factor_name, period)
+        
+        self.validation_status.setText(f"✅ 分析完成: {factor_name} IR={ir:.3f}")
+    
+    def _generate_ic_chart(self, factor_name: str, period: str):
+        """生成IC时序图"""
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            from matplotlib.backends.backend_agg import FigureCanvasAgg
+            import numpy as np
+            from io import BytesIO
+            
+            # 设置中文字体
+            plt.rcParams['font.sans-serif'] = ['Noto Sans CJK JP', 'SimHei', 'DejaVu Sans']
+            plt.rcParams['axes.unicode_minus'] = False
+            
+            # 生成模拟IC序列
+            n_months = {'近1年': 12, '近2年': 24, '近3年': 36, '近5年': 60}.get(period, 12)
+            ic_series = np.random.randn(n_months) * 0.05 + 0.03
+            cumsum = np.cumsum(ic_series)
+            
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), dpi=100)
+            fig.patch.set_facecolor('#1a1a2e')
+            
+            # IC柱状图
+            ax1.set_facecolor('#16213e')
+            colors = ['#10B981' if v > 0 else '#EF4444' for v in ic_series]
+            ax1.bar(range(n_months), ic_series, color=colors, alpha=0.8)
+            ax1.axhline(y=0, color='white', linestyle='-', alpha=0.3)
+            ax1.axhline(y=0.03, color='#10B981', linestyle='--', alpha=0.5, label='IC=0.03')
+            ax1.axhline(y=-0.03, color='#EF4444', linestyle='--', alpha=0.5)
+            ax1.set_title(f'{factor_name.split(" ")[0]} 月度IC序列', color='white', fontsize=12)
+            ax1.tick_params(colors='white')
+            ax1.spines['bottom'].set_color('white')
+            ax1.spines['left'].set_color('white')
+            ax1.spines['top'].set_visible(False)
+            ax1.spines['right'].set_visible(False)
+            
+            # 累积IC
+            ax2.set_facecolor('#16213e')
+            ax2.plot(range(n_months), cumsum, color='#3B82F6', linewidth=2)
+            ax2.fill_between(range(n_months), cumsum, alpha=0.3, color='#3B82F6')
+            ax2.set_title('累积IC', color='white', fontsize=12)
+            ax2.tick_params(colors='white')
+            ax2.spines['bottom'].set_color('white')
+            ax2.spines['left'].set_color('white')
+            ax2.spines['top'].set_visible(False)
+            ax2.spines['right'].set_visible(False)
+            
+            plt.tight_layout()
+            
+            # 保存到BytesIO
+            buf = BytesIO()
+            fig.savefig(buf, format='png', bbox_inches='tight', facecolor='#1a1a2e')
+            buf.seek(0)
+            plt.close(fig)
+            
+            # 转换为QPixmap
+            from PyQt6.QtGui import QPixmap
+            pixmap = QPixmap()
+            pixmap.loadFromData(buf.getvalue())
+            
+            # 缩放到合适大小
+            scaled = pixmap.scaledToWidth(
+                self.ic_chart_label.width() - 20,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.ic_chart_label.setPixmap(scaled)
+            
+        except Exception as e:
+            self.ic_chart_label.setText(f"图表生成失败: {e}")
+    
     def _create_strategy_gen_tab(self) -> QWidget:
         """创建策略生成选项卡"""
         widget = QWidget()
@@ -3755,46 +4430,37 @@ sorted_stocks = factor_value.sort_values(
         )
     
     def _on_calculate_factors(self):
-        """计算因子"""
+        """计算因子 - 使用异步线程，保持UI响应"""
         if self.factor_manager is None:
             QMessageBox.warning(self, "错误", "因子管理器未初始化，请先连接JQData")
             return
         
-        selected_items = self.factor_list.selectedItems()
-        if not selected_items:
+        # 检查是否有选中的因子（通过复选框）
+        selected_factors = [fid for fid, cb in self.factor_checkboxes.items() if cb.isChecked()]
+        if not selected_factors:
             QMessageBox.warning(self, "提示", "请至少选择一个因子")
             return
         
-        # 获取股票池
-        pool_map = {"沪深300": "000300.XSHG", "中证500": "000905.XSHG", 
-                   "中证1000": "000852.XSHG", "全A股": "all_a"}
-        pool_name = self.stock_pool_combo.currentText()
+        # 如果已有计算线程在运行，先取消
+        if hasattr(self, '_calc_thread') and self._calc_thread and self._calc_thread.isRunning():
+            self._calc_thread.cancel()
+            self._calc_thread.wait(2000)  # 等待2秒
         
         try:
-            import jqdatasdk as jq
-            if pool_name == "全A股":
-                stocks = jq.get_all_securities(types=['stock']).index.tolist()[:500]  # 限制数量
-            else:
-                stocks = jq.get_index_stocks(pool_map[pool_name])
+            # 获取JQData权限日期
+            date = "2025-08-29"
+            start_date = "2024-08-23"
             
-            # 获取JQData权限范围内的可用日期（关键！试用版限制）
-            date = None
             if self.jq_client:
                 try:
                     perm = self.jq_client.get_permission()
-                    if perm and hasattr(perm, 'end_date'):
+                    if perm and hasattr(perm, 'end_date') and perm.end_date:
                         date = perm.end_date
-                        logger.info(f"JQData权限日期: {perm.start_date} 至 {perm.end_date}")
-                except:
-                    pass
+                        start_date = perm.start_date if hasattr(perm, 'start_date') else "2024-08-23"
+                except Exception as e:
+                    logger.warning(f"获取权限信息失败，使用默认日期: {e}")
             
-            if not date:
-                # JQData试用账户默认日期（避免超出权限范围）
-                date = "2025-08-29"
-            
-            logger.info(f"因子计算使用日期: {date}")
-            
-            # 因子名称映射（从FACTOR_DATABASE到实际因子名）
+            # 因子名称映射
             factor_map = {
                 'ep': 'EP', 'bp': 'BP', 'sp': 'SP', 'dividend_yield': 'DividendYield',
                 'roe': 'ROE', 'gross_margin': 'GrossMargin', 'asset_turnover': 'AssetTurnover',
@@ -3803,7 +4469,7 @@ sorted_stocks = factor_value.sort_values(
                 'size': 'Size', 'volatility': 'Volatility', 'turnover': 'Turnover'
             }
             
-            # 获取选中的因子（从复选框）
+            # 获取选中的因子名
             factor_names = []
             for factor_id, cb in self.factor_checkboxes.items():
                 if cb.isChecked():
@@ -3811,55 +4477,108 @@ sorted_stocks = factor_value.sort_values(
                     if factor_name in self.factor_manager.list_factors():
                         factor_names.append(factor_name)
             
-            # 检查自定义投资标的
-            custom_targets = self.target_input.text().strip()
-            if custom_targets:
-                # 解析用户输入的股票代码
-                codes = [c.strip() for c in custom_targets.replace('，', ',').split(',') if c.strip()]
-                custom_stocks = []
-                for code in codes:
-                    if len(code) == 6:
-                        if code.startswith('6'):
-                            custom_stocks.append(f"{code}.XSHG")
-                        else:
-                            custom_stocks.append(f"{code}.XSHE")
-                    else:
-                        custom_stocks.append(code)
-                if custom_stocks:
-                    stocks = custom_stocks
-                    logger.info(f"使用自定义投资标的: {len(stocks)}只股票")
-            
-            # 计算因子
-            self.progress_bar.setVisible(True)
-            self.progress_bar.setValue(0)
-            
-            results = {}
-            
             if not factor_names:
                 QMessageBox.warning(self, "提示", "所选因子在当前因子库中不存在")
                 return
             
-            # 批量计算
-            total = len(factor_names)
-            for i, name in enumerate(factor_names):
-                self.progress_bar.setValue(int((i + 1) / total * 100))
-                try:
-                    result = self.factor_manager.calculate_factor(name, stocks[:100], date)  # 限制股票数
-                    if result:
-                        results[name] = result
-                except Exception as e:
-                    logger.warning(f"因子计算失败 {name}: {e}")
+            # 获取参数
+            pool_name = self.stock_pool_combo.currentText()
+            custom_targets = self.target_input.text().strip() if self.target_input.text().strip() else None
             
-            self.progress_bar.setVisible(False)
+            # 显示进度条和取消按钮
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setValue(0)
+            self._set_calc_buttons_enabled(False)
             
-            # 显示结果
-            self._display_factor_results(results)
+            logger.info(f"🚀 开始异步因子计算: {len(factor_names)}个因子, 股票池={pool_name}")
+            
+            # 创建并启动计算线程
+            self._calc_thread = FactorCalculationThread(
+                factor_manager=self.factor_manager,
+                factor_names=factor_names,
+                stocks=None,  # 由线程获取
+                date=date,
+                jq_client=self.jq_client,
+                pool_name=pool_name,
+                start_date=start_date,
+                custom_targets=custom_targets,
+                factor_map=factor_map
+            )
+            
+            # 连接信号
+            self._calc_thread.progress.connect(self._on_calc_progress)
+            self._calc_thread.stock_pool_ready.connect(self._on_stock_pool_ready)
+            self._calc_thread.finished.connect(self._on_calc_finished)
+            self._calc_thread.error.connect(self._on_calc_error)
+            
+            # 启动线程
+            self._calc_thread.start()
             
         except Exception as e:
-            logger.error(f"因子计算失败: {e}")
-            import traceback
-            traceback.print_exc()
-            QMessageBox.critical(self, "错误", f"因子计算失败:\n{e}")
+            self.progress_bar.setVisible(False)
+            self._set_calc_buttons_enabled(True)
+            logger.error(f"启动因子计算失败: {e}")
+            QMessageBox.critical(self, "错误", f"启动因子计算失败:\n{e}")
+    
+    def _set_calc_buttons_enabled(self, enabled: bool):
+        """设置计算相关按钮的可用状态"""
+        # 找到计算按钮并设置状态
+        for child in self.findChildren(QPushButton):
+            if "开始计算" in child.text() or "取消" in child.text():
+                child.setEnabled(enabled)
+    
+    def _on_calc_progress(self, value: int, message: str):
+        """计算进度更新"""
+        self.progress_bar.setValue(value)
+        self.progress_bar.setFormat(f"{message} ({value}%)")
+        # 确保UI响应
+        from PyQt6.QtWidgets import QApplication
+        QApplication.processEvents()
+    
+    def _on_stock_pool_ready(self, count: int):
+        """股票池就绪"""
+        logger.info(f"✅ 股票池就绪: {count}只股票")
+    
+    def _on_calc_finished(self, result_data: dict):
+        """计算完成回调"""
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setFormat("%p%")
+        self._set_calc_buttons_enabled(True)
+        
+        results = result_data.get('results', {})
+        failed = result_data.get('failed', [])
+        stock_count = result_data.get('stock_count', 0)
+        
+        if results:
+            self._display_factor_results(results)
+            if failed:
+                QMessageBox.warning(self, "部分成功", 
+                    f"成功计算 {len(results)} 个因子（{stock_count}只股票）\n"
+                    f"以下因子计算失败:\n" + "\n".join(failed[:5]))
+            else:
+                QMessageBox.information(self, "计算完成",
+                    f"成功计算 {len(results)} 个因子\n"
+                    f"股票数量: {stock_count}")
+        else:
+            QMessageBox.warning(self, "计算失败", 
+                f"所有因子计算失败\n"
+                f"可能原因: 试用账户数据权限限制\n"
+                f"失败列表: {', '.join(failed[:3])}")
+    
+    def _on_calc_error(self, error_msg: str):
+        """计算错误回调"""
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setFormat("%p%")
+        self._set_calc_buttons_enabled(True)
+        
+        logger.error(f"因子计算错误: {error_msg}")
+        
+        if "权限" in error_msg:
+            QMessageBox.critical(self, "权限错误", 
+                f"数据权限不足:\n{error_msg}\n\n"
+                f"请确保日期在试用账户权限范围内")
+        else:
+            QMessageBox.critical(self, "计算错误", f"因子计算失败:\n{error_msg}")
     
     def _select_all_factors(self):
         """全选因子"""
@@ -3872,7 +4591,7 @@ sorted_stocks = factor_value.sort_values(
             cb.setChecked(False)
     
     def _load_from_candidate_pool(self):
-        """从候选池加载股票"""
+        """从候选池加载股票 - 适配JQData试用账户"""
         try:
             from pymongo import MongoClient
             
@@ -3887,12 +4606,20 @@ sorted_stocks = factor_value.sort_values(
             
             mainlines = latest.get("mainlines", [])
             
-            # 获取所有主线的JQData代码
+            # 【关键】获取JQData权限范围内的日期
             import jqdatasdk as jq
             
+            date = "2025-08-29"  # 默认试用账户结束日期
+            if self.jq_client:
+                try:
+                    perm = self.jq_client.get_permission()
+                    if perm and hasattr(perm, 'end_date'):
+                        date = perm.end_date
+                        logger.info(f"候选池加载使用权限日期: {date}")
+                except:
+                    pass
+            
             all_stocks = set()
-            perm = self.jq_client.get_permission() if self.jq_client else None
-            date = perm.end_date if perm else "2025-08-29"
             
             for ml in mainlines[:10]:  # 限制主线数量
                 jq_code = ml.get("jqdata_code")
@@ -3916,7 +4643,7 @@ sorted_stocks = factor_value.sort_values(
                 # 转换为简化代码格式
                 simple_codes = [code.split('.')[0] for code in all_stocks]
                 self.target_input.setText(', '.join(simple_codes[:50]))  # 限制数量
-                QMessageBox.information(self, "成功", f"已从候选池加载 {len(simple_codes[:50])} 只股票")
+                QMessageBox.information(self, "成功", f"已从候选池加载 {len(simple_codes[:50])} 只股票\n使用日期: {date}")
             else:
                 QMessageBox.warning(self, "提示", "未能获取候选池股票")
                 

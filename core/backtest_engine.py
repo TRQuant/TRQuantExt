@@ -1,316 +1,540 @@
+# -*- coding: utf-8 -*-
 """
-回测引擎核心模块
-"""
-import pandas as pd
-from typing import Dict, List, Optional, Callable, Union
-from datetime import datetime, date, timedelta
-import logging
-from pathlib import Path
+本地回测引擎
+============
 
-from .data_provider import DataProvider
-from .portfolio import Portfolio
-from .order_manager import OrderManager
-from strategies.base_strategy import BaseStrategy
+基于Backtrader的本地回测引擎
+
+功能:
+1. 多因子选股策略回测
+2. 绩效指标计算（夏普、最大回撤、年化等）
+3. 净值曲线生成
+4. 回测报告生成
+"""
+
+import logging
+from dataclasses import dataclass, field
+from datetime import datetime, date, timedelta
+from typing import List, Dict, Optional, Any, Tuple
+from enum import Enum
+import pandas as pd
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
-class BacktestEngine:
-    """回测引擎"""
+# 尝试导入backtrader
+try:
+    import backtrader as bt
+    BACKTRADER_AVAILABLE = True
+except ImportError:
+    BACKTRADER_AVAILABLE = False
+    logger.warning("Backtrader未安装，使用简化回测引擎")
+
+
+@dataclass
+class BacktestConfig:
+    """回测配置"""
+    start_date: str
+    end_date: str
+    initial_capital: float = 1000000.0
+    commission_rate: float = 0.0003     # 佣金率
+    stamp_tax_rate: float = 0.001       # 印花税
+    slippage: float = 0.001             # 滑点
+    benchmark: str = "000300.XSHG"      # 基准
+    position_limit: int = 20            # 最大持仓
+    rebalance_freq: str = "monthly"     # 调仓频率
     
-    def __init__(
-        self,
-        data_provider: DataProvider,
-        initial_cash: float = 1000000,
-        commission_rate: float = 0.0003,
-        slippage: float = 0.001
-    ):
-        """
-        初始化回测引擎
-        
-        Args:
-            data_provider: 数据提供者
-            initial_cash: 初始资金
-            commission_rate: 手续费率
-            slippage: 滑点
-        """
-        self.data_provider = data_provider
-        self.portfolio = Portfolio(initial_cash=initial_cash)
-        self.order_manager = OrderManager(
-            commission_rate=commission_rate,
-            slippage=slippage
-        )
-        self.strategy: Optional[BaseStrategy] = None
-        self.results = {}
+
+@dataclass
+class TradeRecord:
+    """交易记录"""
+    date: str
+    stock_code: str
+    stock_name: str
+    direction: str  # buy/sell
+    price: float
+    quantity: int
+    amount: float
+    pnl: float = 0.0
+    pnl_pct: float = 0.0
+
+
+@dataclass
+class PerformanceMetrics:
+    """绩效指标"""
+    total_return: float          # 总收益率
+    annual_return: float         # 年化收益率
+    benchmark_return: float      # 基准收益率
+    excess_return: float         # 超额收益
+    sharpe_ratio: float          # 夏普比率
+    max_drawdown: float          # 最大回撤
+    max_drawdown_duration: int   # 最大回撤持续天数
+    win_rate: float              # 胜率
+    profit_loss_ratio: float     # 盈亏比
+    volatility: float            # 波动率
+    calmar_ratio: float          # 卡尔玛比率
+    sortino_ratio: float         # 索提诺比率
+    trade_count: int             # 交易次数
+    avg_holding_days: float      # 平均持仓天数
     
-    def set_strategy(self, strategy: BaseStrategy):
-        """
-        设置策略
-        
-        Args:
-            strategy: 策略实例
-        """
-        self.strategy = strategy
-        # 初始化策略上下文
-        context = {
-            'portfolio': self.portfolio,
-            'data_provider': self.data_provider,
-            'order_manager': self.order_manager,
-            'securities': []  # 可以从配置或数据中获取
+    def to_dict(self) -> dict:
+        return {
+            'total_return': f"{self.total_return:.2%}",
+            'annual_return': f"{self.annual_return:.2%}",
+            'benchmark_return': f"{self.benchmark_return:.2%}",
+            'excess_return': f"{self.excess_return:.2%}",
+            'sharpe_ratio': f"{self.sharpe_ratio:.2f}",
+            'max_drawdown': f"{self.max_drawdown:.2%}",
+            'max_drawdown_duration': f"{self.max_drawdown_duration}天",
+            'win_rate': f"{self.win_rate:.2%}",
+            'profit_loss_ratio': f"{self.profit_loss_ratio:.2f}",
+            'volatility': f"{self.volatility:.2%}",
+            'calmar_ratio': f"{self.calmar_ratio:.2f}",
+            'sortino_ratio': f"{self.sortino_ratio:.2f}",
+            'trade_count': self.trade_count,
+            'avg_holding_days': f"{self.avg_holding_days:.1f}天"
         }
-        strategy.initialize(context)
+
+
+@dataclass
+class BacktestResult:
+    """回测结果"""
+    config: BacktestConfig
+    metrics: PerformanceMetrics
+    equity_curve: pd.DataFrame      # 净值曲线
+    trades: List[TradeRecord]       # 交易记录
+    daily_returns: pd.Series        # 日收益率
+    positions: pd.DataFrame         # 持仓记录
+    benchmark_curve: pd.DataFrame   # 基准曲线
+    run_time: float = 0.0          # 运行时间(秒)
     
-    def run(
-        self,
-        start_date: Union[str, date, datetime],
-        end_date: Union[str, date, datetime],
-        securities: List[str],
-        frequency: str = 'daily'
-    ) -> Dict:
+    def to_dict(self) -> dict:
+        return {
+            'config': {
+                'start_date': self.config.start_date,
+                'end_date': self.config.end_date,
+                'initial_capital': self.config.initial_capital,
+                'benchmark': self.config.benchmark
+            },
+            'metrics': self.metrics.to_dict(),
+            'trade_count': len(self.trades),
+            'run_time': f"{self.run_time:.1f}秒"
+        }
+
+
+class SimpleBacktestEngine:
+    """
+    简化回测引擎（不依赖Backtrader）
+    
+    用于快速验证策略逻辑
+    """
+    
+    def __init__(self, config: BacktestConfig):
+        self.config = config
+        self.trades: List[TradeRecord] = []
+        self.equity_curve = []
+        self.positions = {}
+        self.cash = config.initial_capital
+        self.current_value = config.initial_capital
+    
+    def run(self, stock_scores: Dict[str, pd.DataFrame]) -> BacktestResult:
         """
-        运行回测
+        执行回测
         
         Args:
-            start_date: 开始日期
-            end_date: 结束日期
-            securities: 股票代码列表
-            frequency: 频率
+            stock_scores: 股票评分数据 {stock_code: DataFrame with date, score columns}
         
         Returns:
-            Dict: 回测结果
+            BacktestResult
         """
-        if self.strategy is None:
-            raise Exception("未设置策略，请先调用set_strategy()")
+        logger.info(f"🚀 开始回测: {self.config.start_date} ~ {self.config.end_date}")
+        start_time = datetime.now()
         
-        logger.info(f"开始回测: {start_date} to {end_date}")
+        # 获取价格数据
+        price_data = self._get_price_data(list(stock_scores.keys()))
+        benchmark_data = self._get_benchmark_data()
         
-        # 获取所有数据
-        all_data = self.data_provider.get_price_data(
-            securities=securities,
-            start_date=start_date,
-            end_date=end_date,
-            frequency=frequency
+        # 生成交易日期序列
+        dates = pd.date_range(self.config.start_date, self.config.end_date, freq='B')
+        rebalance_dates = self._get_rebalance_dates(dates)
+        
+        equity_records = []
+        
+        for dt in dates:
+            dt_str = dt.strftime('%Y-%m-%d')
+            
+            # 更新持仓市值
+            self._update_positions_value(dt_str, price_data)
+            
+            # 调仓日
+            if dt in rebalance_dates:
+                target_stocks = self._select_stocks(dt_str, stock_scores)
+                self._rebalance(dt_str, target_stocks, price_data)
+            
+            # 记录净值
+            equity_records.append({
+                'date': dt_str,
+                'equity': self.current_value,
+                'cash': self.cash,
+                'positions_value': self.current_value - self.cash
+            })
+        
+        # 构建结果
+        equity_df = pd.DataFrame(equity_records)
+        equity_df['date'] = pd.to_datetime(equity_df['date'])
+        equity_df.set_index('date', inplace=True)
+        
+        # 计算日收益率
+        equity_df['returns'] = equity_df['equity'].pct_change()
+        
+        # 计算绩效指标
+        metrics = self._calculate_metrics(equity_df, benchmark_data)
+        
+        run_time = (datetime.now() - start_time).total_seconds()
+        
+        result = BacktestResult(
+            config=self.config,
+            metrics=metrics,
+            equity_curve=equity_df,
+            trades=self.trades,
+            daily_returns=equity_df['returns'],
+            positions=pd.DataFrame(),  # TODO: 持仓记录
+            benchmark_curve=benchmark_data,
+            run_time=run_time
         )
         
-        if all_data.empty:
-            raise Exception("未获取到数据")
-        
-        # 更新策略上下文中的股票列表
-        self.strategy.context['securities'] = securities
-        
-        # 按日期遍历
-        # 聚宽返回的数据格式：索引为日期，可能有security列区分不同股票
-        if 'security' in all_data.columns:
-            # 多只股票数据，需要按日期和股票代码组织
-            dates = sorted(all_data.index.unique()) if isinstance(all_data.index, pd.DatetimeIndex) else []
-        else:
-            # 单只股票数据
-            dates = sorted(all_data.index.unique()) if isinstance(all_data.index, pd.DatetimeIndex) else []
-        
-        for current_date in dates:
-            try:
-                # 获取当日数据
-                if 'security' in all_data.columns:
-                    # 多只股票：筛选当日数据
-                    daily_data = all_data.loc[all_data.index == current_date] if current_date in all_data.index else pd.DataFrame()
-                else:
-                    # 单只股票：直接获取
-                    daily_data = all_data.loc[current_date] if current_date in all_data.index else pd.Series()
-                
-                if isinstance(daily_data, pd.Series):
-                    if daily_data.empty:
-                        continue
-                elif isinstance(daily_data, pd.DataFrame):
-                    if daily_data.empty:
-                        continue
-                
-                # 交易开始前
-                self.strategy.before_trading_start(current_date)
-                
-                # 处理数据（策略逻辑）
-                self.strategy.handle_data(daily_data, current_date)
-                
-                # 处理订单
-                self._process_orders(current_date, daily_data)
-                
-                # 更新持仓价格
-                prices = {}
-                for sec in securities:
-                    try:
-                        if 'security' in all_data.columns:
-                            # 多只股票：从DataFrame中筛选该股票的数据
-                            sec_data = daily_data[daily_data['security'] == sec] if isinstance(daily_data, pd.DataFrame) else None
-                            if sec_data is not None and not sec_data.empty:
-                                price = sec_data['close'].iloc[0] if 'close' in sec_data.columns else None
-                            else:
-                                price = None
-                        else:
-                            # 单只股票：直接从Series获取
-                            if isinstance(daily_data, pd.Series):
-                                price = daily_data.get('close')
-                            elif isinstance(daily_data, pd.DataFrame):
-                                price = daily_data['close'].iloc[0] if 'close' in daily_data.columns else None
-                            else:
-                                price = None
-                        
-                        if price is not None and not pd.isna(price):
-                            prices[sec] = float(price)
-                    except Exception as e:
-                        logger.debug(f"获取 {sec} 价格失败: {str(e)}")
-                        pass
-                
-                self.portfolio.update_prices(prices)
-                
-                # 交易结束后
-                self.strategy.after_trading_end(current_date)
-                
-                # 记录组合状态
-                self.portfolio.record(current_date)
-                
-            except Exception as e:
-                logger.error(f"处理日期 {current_date} 时出错: {str(e)}")
-                continue
-        
-        # 生成回测结果
-        self.results = self._generate_results(start_date, end_date)
-        logger.info("回测完成")
-        
-        return self.results
+        logger.info(f"✅ 回测完成: 收益率={metrics.total_return:.2%}, 夏普={metrics.sharpe_ratio:.2f}")
+        return result
     
-    def _process_orders(self, date: datetime, daily_data):
-        """处理订单"""
-        from .order_manager import OrderStatus
-        # 获取待处理订单
-        pending_orders = [o for o in self.order_manager.orders if o.status == OrderStatus.PENDING]
+    def _get_price_data(self, stocks: List[str]) -> Dict[str, pd.DataFrame]:
+        """获取价格数据"""
+        price_data = {}
         
-        for order in pending_orders:
-            try:
-                # 获取当前价格
-                # daily_data可能是Series（单股票）或DataFrame（多股票）
-                current_price = None
-                
-                if isinstance(daily_data, pd.Series):
-                    # 单股票Series
-                    current_price = daily_data.get('close')
-                elif isinstance(daily_data, pd.DataFrame):
-                    # DataFrame：可能是多股票或单股票
-                    if 'security' in daily_data.columns:
-                        # 多股票：查找对应股票的数据
-                        sec_data = daily_data[daily_data['security'] == order.security]
-                        if not sec_data.empty and 'close' in sec_data.columns:
-                            current_price = sec_data['close'].iloc[0]
-                    else:
-                        # 单股票DataFrame
-                        if 'close' in daily_data.columns:
-                            current_price = daily_data['close'].iloc[0]
-                
-                if current_price is None or pd.isna(current_price):
-                    logger.debug(f"无法获取 {order.security} 在 {date} 的价格")
-                    continue
-                
-                # 处理订单
-                if self.order_manager.process_order(order, float(current_price)):
-                    # 设置成交时间
-                    if order.fill_time is None:
-                        order.fill_time = date
-                    
-                    # 更新投资组合
-                    portfolio = self.portfolio
-                    commission = self.order_manager.get_commission(order)
-                    
-                    if order.fill_amount > 0:  # 买入
-                        cost = order.fill_amount * order.fill_price + commission
-                        if portfolio.cash >= cost:
-                            portfolio.cash -= cost
-                            portfolio.add_position(
-                                order.security,
-                                order.fill_amount,
-                                order.fill_price
-                            )
-                    else:  # 卖出
-                        position = portfolio.get_position(order.security)
-                        if position and position.amount >= abs(order.fill_amount):
-                            revenue = abs(order.fill_amount) * order.fill_price - commission
-                            portfolio.cash += revenue
-                            portfolio.remove_position(
-                                order.security,
-                                abs(order.fill_amount),
-                                order.fill_price
-                            )
+        try:
+            from core.data_source_manager import get_data_source_manager
             
-            except Exception as e:
-                logger.error(f"处理订单失败: {str(e)}")
+            manager = get_data_source_manager()
+            
+            for stock in stocks[:50]:  # 限制数量
+                result = manager.get_price(
+                    stock, 
+                    self.config.start_date, 
+                    self.config.end_date
+                )
+                if result.success and result.data is not None:
+                    price_data[stock] = result.data
+                    
+        except Exception as e:
+            logger.warning(f"获取价格数据失败: {e}")
+        
+        return price_data
     
-    def _generate_results(self, start_date, end_date) -> Dict:
-        """生成回测结果"""
-        summary = self.portfolio.get_summary()
-        
-        # 计算收益率曲线
-        returns = pd.Series(self.portfolio.total_value_history, index=self.portfolio.date_history)
-        returns_pct = returns.pct_change().fillna(0)
-        
-        # 计算指标
-        total_return = summary['total_profit_rate']
-        annual_return = (1 + total_return) ** (252 / len(returns)) - 1 if len(returns) > 0 else 0
-        sharpe_ratio = returns_pct.mean() / returns_pct.std() * (252 ** 0.5) if returns_pct.std() > 0 else 0
-        max_drawdown = self._calculate_max_drawdown(returns)
-        
-        # 获取交易历史
-        filled_orders = self.order_manager.get_filled_orders()
-        trade_history = []
-        for order in filled_orders:
-            if order.status.value == 'filled' and order.fill_time:
-                trade_type = '买入' if order.fill_amount > 0 else '卖出'
-                trade_value = abs(order.fill_amount * order.fill_price)
-                commission = self.order_manager.get_commission(order)
+    def _get_benchmark_data(self) -> pd.DataFrame:
+        """获取基准数据"""
+        try:
+            from core.data_source_manager import get_data_source_manager
+            
+            manager = get_data_source_manager()
+            result = manager.get_price(
+                self.config.benchmark,
+                self.config.start_date,
+                self.config.end_date
+            )
+            
+            if result.success and result.data is not None:
+                df = result.data.copy()
+                df['returns'] = df['close'].pct_change()
+                df['cumulative'] = (1 + df['returns']).cumprod()
+                return df
                 
-                # 计算净现金流：
-                # 买入：净流出 = -(交易金额 + 佣金)，负值表示现金流出
-                # 卖出：净流入 = 交易金额 - 佣金，正值表示现金流入
-                if order.fill_amount > 0:  # 买入
-                    net_value = -(trade_value + commission)  # 负值表示流出
-                else:  # 卖出
-                    net_value = trade_value - commission  # 正值表示流入
-                
-                trade_history.append({
-                    'date': order.fill_time.strftime('%Y-%m-%d %H:%M:%S') if isinstance(order.fill_time, datetime) else str(order.fill_time),
-                    'security': order.security,
-                    'type': trade_type,
-                    'amount': abs(order.fill_amount),
-                    'price': order.fill_price,
-                    'value': trade_value,
-                    'commission': commission,
-                    'net_value': net_value
-                })
+        except Exception as e:
+            logger.warning(f"获取基准数据失败: {e}")
         
-        # 按日期排序
-        trade_history.sort(key=lambda x: x['date'])
-        
-        return {
-            'summary': summary,
-            'returns': returns,
-            'returns_pct': returns_pct,
-            'metrics': {
-                'total_return': total_return,
-                'annual_return': annual_return,
-                'sharpe_ratio': sharpe_ratio,
-                'max_drawdown': max_drawdown,
-                'total_trades': len(filled_orders)
-            },
-            'portfolio_history': {
-                'dates': self.portfolio.date_history,
-                'total_value': self.portfolio.total_value_history,
-                'cash': self.portfolio.cash_history
-            },
-            'trade_history': trade_history
-        }
+        return pd.DataFrame()
     
-    def _calculate_max_drawdown(self, returns: pd.Series) -> float:
-        """计算最大回撤"""
-        if len(returns) == 0:
-            return 0.0
+    def _get_rebalance_dates(self, dates: pd.DatetimeIndex) -> set:
+        """获取调仓日期"""
+        freq = self.config.rebalance_freq
         
-        cumulative = (1 + returns.pct_change().fillna(0)).cumprod()
-        running_max = cumulative.expanding().max()
-        drawdown = (cumulative - running_max) / running_max
-        return abs(drawdown.min())
+        if freq == 'daily':
+            return set(dates)
+        elif freq == 'weekly':
+            # 每周一
+            return set(dates[dates.dayofweek == 0])
+        elif freq == 'biweekly':
+            weekly = dates[dates.dayofweek == 0]
+            return set(weekly[::2])
+        elif freq == 'monthly':
+            # 每月第一个交易日
+            return set(dates.to_series().groupby(dates.to_period('M')).first())
+        elif freq == 'quarterly':
+            return set(dates.to_series().groupby(dates.to_period('Q')).first())
+        
+        return set(dates.to_series().groupby(dates.to_period('M')).first())
+    
+    def _select_stocks(self, date: str, stock_scores: Dict[str, pd.DataFrame]) -> List[str]:
+        """选股"""
+        scores = []
+        
+        for stock, df in stock_scores.items():
+            if df is not None and not df.empty:
+                # 获取最近的评分
+                if 'date' in df.columns:
+                    mask = df['date'] <= date
+                    if mask.any():
+                        latest = df[mask].iloc[-1]
+                        if 'score' in latest:
+                            scores.append((stock, float(latest['score'])))
+                elif 'score' in df.columns:
+                    scores.append((stock, float(df['score'].iloc[-1])))
+        
+        # 按评分排序
+        scores.sort(key=lambda x: x[1], reverse=True)
+        
+        # 返回前N只
+        return [s[0] for s in scores[:self.config.position_limit]]
+    
+    def _update_positions_value(self, date: str, price_data: Dict[str, pd.DataFrame]):
+        """更新持仓市值"""
+        positions_value = 0
+        
+        for stock, qty in list(self.positions.items()):
+            if stock in price_data:
+                df = price_data[stock]
+                if not df.empty:
+                    # 获取当日收盘价
+                    try:
+                        if hasattr(df.index, 'strftime'):
+                            mask = df.index.strftime('%Y-%m-%d') <= date
+                        else:
+                            mask = df.index <= date
+                        
+                        if mask.any():
+                            price = df.loc[mask, 'close'].iloc[-1]
+                            positions_value += qty * price
+                        else:
+                            # 使用首日价格
+                            positions_value += qty * df['close'].iloc[0]
+                    except:
+                        positions_value += qty * df['close'].iloc[-1] if not df.empty else 0
+        
+        self.current_value = self.cash + positions_value
+    
+    def _rebalance(self, date: str, target_stocks: List[str], price_data: Dict[str, pd.DataFrame]):
+        """调仓"""
+        if not target_stocks:
+            return
+        
+        # 计算目标仓位
+        target_weight = 1.0 / len(target_stocks)
+        target_value = self.current_value * target_weight * 0.95  # 留5%现金
+        
+        # 卖出不在目标中的股票
+        for stock in list(self.positions.keys()):
+            if stock not in target_stocks:
+                self._sell(stock, date, price_data)
+        
+        # 买入目标股票
+        for stock in target_stocks:
+            if stock not in self.positions:
+                self._buy(stock, target_value, date, price_data)
+    
+    def _buy(self, stock: str, target_value: float, date: str, price_data: Dict[str, pd.DataFrame]):
+        """买入"""
+        if stock not in price_data or price_data[stock].empty:
+            return
+        
+        try:
+            df = price_data[stock]
+            if hasattr(df.index, 'strftime'):
+                mask = df.index.strftime('%Y-%m-%d') <= date
+            else:
+                mask = df.index <= date
+            
+            if not mask.any():
+                return
+            
+            price = df.loc[mask, 'close'].iloc[-1]
+            
+            # 计算可买数量（100股整数）
+            quantity = int(target_value / price / 100) * 100
+            
+            if quantity <= 0:
+                return
+            
+            cost = quantity * price * (1 + self.config.commission_rate + self.config.slippage)
+            
+            if cost > self.cash:
+                quantity = int(self.cash / price / (1 + self.config.commission_rate + self.config.slippage) / 100) * 100
+                cost = quantity * price * (1 + self.config.commission_rate + self.config.slippage)
+            
+            if quantity > 0 and cost <= self.cash:
+                self.cash -= cost
+                self.positions[stock] = self.positions.get(stock, 0) + quantity
+                
+                self.trades.append(TradeRecord(
+                    date=date,
+                    stock_code=stock,
+                    stock_name='',
+                    direction='buy',
+                    price=price,
+                    quantity=quantity,
+                    amount=cost
+                ))
+                
+        except Exception as e:
+            logger.debug(f"买入失败 {stock}: {e}")
+    
+    def _sell(self, stock: str, date: str, price_data: Dict[str, pd.DataFrame]):
+        """卖出"""
+        if stock not in self.positions or self.positions[stock] <= 0:
+            return
+        
+        if stock not in price_data or price_data[stock].empty:
+            return
+        
+        try:
+            df = price_data[stock]
+            if hasattr(df.index, 'strftime'):
+                mask = df.index.strftime('%Y-%m-%d') <= date
+            else:
+                mask = df.index <= date
+            
+            if not mask.any():
+                return
+            
+            price = df.loc[mask, 'close'].iloc[-1]
+            quantity = self.positions[stock]
+            
+            proceeds = quantity * price * (1 - self.config.commission_rate - self.config.stamp_tax_rate - self.config.slippage)
+            
+            self.cash += proceeds
+            del self.positions[stock]
+            
+            self.trades.append(TradeRecord(
+                date=date,
+                stock_code=stock,
+                stock_name='',
+                direction='sell',
+                price=price,
+                quantity=quantity,
+                amount=proceeds
+            ))
+            
+        except Exception as e:
+            logger.debug(f"卖出失败 {stock}: {e}")
+    
+    def _calculate_metrics(self, equity_df: pd.DataFrame, benchmark_df: pd.DataFrame) -> PerformanceMetrics:
+        """计算绩效指标"""
+        returns = equity_df['returns'].dropna()
+        
+        # 总收益率
+        total_return = (equity_df['equity'].iloc[-1] / self.config.initial_capital) - 1
+        
+        # 年化收益率
+        days = len(equity_df)
+        annual_return = (1 + total_return) ** (252 / max(days, 1)) - 1
+        
+        # 基准收益率
+        if not benchmark_df.empty and 'cumulative' in benchmark_df.columns:
+            benchmark_return = benchmark_df['cumulative'].iloc[-1] - 1
+        else:
+            benchmark_return = 0.0
+        
+        # 超额收益
+        excess_return = annual_return - benchmark_return
+        
+        # 波动率
+        volatility = returns.std() * np.sqrt(252)
+        
+        # 夏普比率（假设无风险利率2%）
+        rf = 0.02 / 252
+        sharpe_ratio = (returns.mean() - rf) / returns.std() * np.sqrt(252) if returns.std() > 0 else 0
+        
+        # 最大回撤
+        cummax = equity_df['equity'].cummax()
+        drawdown = (equity_df['equity'] - cummax) / cummax
+        max_drawdown = abs(drawdown.min())
+        
+        # 最大回撤持续期
+        drawdown_duration = 0
+        if max_drawdown > 0:
+            peak_idx = drawdown.idxmin()
+            recovery = equity_df.loc[peak_idx:, 'equity']
+            if len(recovery) > 1:
+                recovery_idx = recovery[recovery >= cummax[peak_idx]].index
+                if len(recovery_idx) > 0:
+                    drawdown_duration = (recovery_idx[0] - peak_idx).days
+                else:
+                    drawdown_duration = (equity_df.index[-1] - peak_idx).days
+        
+        # 胜率
+        winning_trades = len([t for t in self.trades if t.direction == 'sell' and t.pnl > 0])
+        total_trades = len([t for t in self.trades if t.direction == 'sell'])
+        win_rate = winning_trades / max(total_trades, 1)
+        
+        # 盈亏比
+        profits = sum([t.pnl for t in self.trades if t.pnl > 0])
+        losses = abs(sum([t.pnl for t in self.trades if t.pnl < 0]))
+        profit_loss_ratio = profits / max(losses, 1)
+        
+        # 卡尔玛比率
+        calmar_ratio = annual_return / max(max_drawdown, 0.001)
+        
+        # 索提诺比率
+        downside_returns = returns[returns < 0]
+        downside_std = downside_returns.std() * np.sqrt(252) if len(downside_returns) > 0 else 0.001
+        sortino_ratio = (annual_return - 0.02) / max(downside_std, 0.001)
+        
+        return PerformanceMetrics(
+            total_return=total_return,
+            annual_return=annual_return,
+            benchmark_return=benchmark_return,
+            excess_return=excess_return,
+            sharpe_ratio=sharpe_ratio,
+            max_drawdown=max_drawdown,
+            max_drawdown_duration=drawdown_duration,
+            win_rate=win_rate,
+            profit_loss_ratio=profit_loss_ratio,
+            volatility=volatility,
+            calmar_ratio=calmar_ratio,
+            sortino_ratio=sortino_ratio,
+            trade_count=len(self.trades),
+            avg_holding_days=days / max(total_trades, 1) * 2
+        )
 
+
+def create_backtest_engine(config: BacktestConfig) -> SimpleBacktestEngine:
+    """创建回测引擎"""
+    return SimpleBacktestEngine(config)
+
+
+def run_quick_backtest(
+    stocks: List[str],
+    start_date: str,
+    end_date: str,
+    initial_capital: float = 1000000.0
+) -> BacktestResult:
+    """
+    快速回测
+    
+    Args:
+        stocks: 股票列表
+        start_date: 开始日期
+        end_date: 结束日期
+        initial_capital: 初始资金
+    
+    Returns:
+        BacktestResult
+    """
+    config = BacktestConfig(
+        start_date=start_date,
+        end_date=end_date,
+        initial_capital=initial_capital
+    )
+    
+    # 创建等权评分
+    stock_scores = {s: pd.DataFrame({'score': [1.0]}) for s in stocks}
+    
+    engine = create_backtest_engine(config)
+    return engine.run(stock_scores)

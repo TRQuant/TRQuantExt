@@ -326,6 +326,9 @@ class FactorFilterTab(QWidget):
         self.worker = None
         self._init_ui()
         self._check_data_status()
+        
+        # 立即加载缓存
+        self._load_cached_results()
     
     def set_jq_client(self, jq_client):
         """设置JQData客户端"""
@@ -339,18 +342,39 @@ class FactorFilterTab(QWidget):
     def _init_ui(self):
         """初始化UI"""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(16)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         
-        # 滚动区域
+        # 整页滚动区域
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet(f"""
-            QScrollArea {{ border: none; background: {Colors.BG_SECONDARY}; }}
+            QScrollArea {{
+                border: none;
+                background: {Colors.BG_SECONDARY};
+            }}
+            QScrollBar:vertical {{
+                background-color: {Colors.BG_SECONDARY};
+                width: 10px;
+                border-radius: 5px;
+            }}
+            QScrollBar::handle:vertical {{
+                background-color: {Colors.BORDER_PRIMARY};
+                border-radius: 5px;
+                min-height: 40px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background-color: {Colors.PRIMARY};
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0px;
+            }}
         """)
         
         content = QWidget()
         content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(24, 20, 24, 20)
         content_layout.setSpacing(16)
         
         # === 工具说明 ===
@@ -591,7 +615,7 @@ class FactorFilterTab(QWidget):
         return frame
     
     def _create_result_section(self) -> QFrame:
-        """创建结果表格部分"""
+        """创建结果表格部分 - 显示25项"""
         frame = QFrame()
         frame.setStyleSheet(f"""
             QFrame {{
@@ -603,7 +627,7 @@ class FactorFilterTab(QWidget):
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(0, 0, 0, 0)
         
-        # 表格
+        # 表格 - 固定高度显示25行（每行约35px + 表头40px）
         self.table = QTableWidget()
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels([
@@ -632,7 +656,11 @@ class FactorFilterTab(QWidget):
         """)
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.setMinimumHeight(300)
+        # 固定高度显示25行 (35px/行 * 25 + 40px表头 = 915px)
+        self.table.setMinimumHeight(915)
+        self.table.setMaximumHeight(915)
+        # 禁用表格内部滚动，让整页滚动
+        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         layout.addWidget(self.table)
         
         return frame
@@ -678,6 +706,78 @@ class FactorFilterTab(QWidget):
         else:
             self.pool_label.setText("候选池: ⚠️ 无数据")
             self.pool_label.setStyleSheet(f"color: {Colors.WARNING};")
+    
+    def _load_cached_results(self):
+        """加载缓存的因子筛选结果"""
+        try:
+            from core.cache_manager import get_cache_manager
+            
+            cache_mgr = get_cache_manager()
+            
+            # 检查因子筛选缓存
+            if cache_mgr.is_cache_valid('factor_filter'):
+                cached = cache_mgr.load_cache('factor_filter')
+                if cached:
+                    signals = cached.get('signals', [])
+                    if signals:
+                        self.current_signals = signals
+                        self._update_table(signals)
+                        
+                        timestamp = cached.get('timestamp', '')[:16]
+                        period = cached.get('period', '')
+                        self.status_label.setText(f"📂 已加载缓存 ({timestamp})")
+                        self.ai_btn.setEnabled(len(signals) > 0)
+                        
+                        logger.info(f"✅ 因子筛选加载缓存: {len(signals)}只股票")
+                        return
+            
+            logger.debug("因子筛选无有效缓存")
+            
+        except Exception as e:
+            logger.debug(f"加载因子筛选缓存失败: {e}")
+    
+    def _save_filter_results(self, signals: list, period: str = "medium"):
+        """保存因子筛选结果到缓存"""
+        logger.info(f"💾 正在保存因子筛选缓存: {len(signals)} 条结果")
+        try:
+            from core.cache_manager import get_cache_manager
+            
+            # 转换信号为可序列化格式
+            serializable = []
+            for s in signals:
+                if hasattr(s, '__dict__'):
+                    serializable.append({
+                        'code': getattr(s, 'code', ''),
+                        'name': getattr(s, 'name', ''),
+                        'combined_score': getattr(s, 'combined_score', 0),
+                        'factor_score': getattr(s, 'factor_score', 0),
+                        'mainline': getattr(s, 'mainline', ''),
+                        'signal_strength': getattr(s, 'signal_strength', 'medium'),
+                    })
+                else:
+                    serializable.append(s)
+            
+            # 确保基本类型
+            import json
+            def make_serializable(obj):
+                if hasattr(obj, 'item'):  # numpy types
+                    return obj.item()
+                if isinstance(obj, dict):
+                    return {k: make_serializable(v) for k, v in obj.items()}
+                if isinstance(obj, list):
+                    return [make_serializable(v) for v in obj]
+                return obj
+            
+            clean_signals = make_serializable(serializable)
+            
+            cache_mgr = get_cache_manager()
+            cache_mgr.save_cache('factor_filter', {
+                'signals': clean_signals,
+                'count': len(clean_signals),
+            }, {'period': period})
+            
+        except Exception as e:
+            logger.error(f"❌ 保存因子筛选缓存失败: {e}", exc_info=True)
     
     def _start_filter(self):
         """开始因子筛选"""
@@ -753,6 +853,11 @@ class FactorFilterTab(QWidget):
         self.ai_btn.setEnabled(len(signals) > 0)  # 有结果时启用AI分析
         self.progress.setVisible(False)
         self.status_label.setText(f"✅ 筛选完成，共 {len(signals)} 只股票")
+        
+        # 保存到缓存
+        period_map = {0: "short", 1: "medium", 2: "long"}
+        period = period_map.get(self.period_combo.currentIndex(), "medium")
+        self._save_filter_results(signals, period)
     
     def _on_error(self, error: str):
         """错误处理"""

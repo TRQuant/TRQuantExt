@@ -25,10 +25,14 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl
 from PyQt6.QtGui import QPixmap
 
-# Plotly设置
-import plotly.graph_objects as go
-import plotly.io as pio
+# Matplotlib雷达图
+import matplotlib
+matplotlib.use('Agg')  # 非GUI后端
+import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 import numpy as np
+import io
 
 from gui.styles.theme import Colors
 
@@ -126,9 +130,11 @@ class CompositeDimensionTab(QWidget):
         self.selected_indices = set()
         self.checkboxes = []
         self._cached_data = None  # 缓存上次结果
+        self.table_frame = None  # 初始化表格框架引用
+        self.table = None  # 表格控件引用
         self.setup_ui()
         
-        # 初始化时自动加载缓存
+        # 立即加载缓存（setup_ui已完成）
         self._load_cached_results()
     
     def setup_ui(self):
@@ -220,9 +226,17 @@ class CompositeDimensionTab(QWidget):
         
         layout.addWidget(radar_section)
         
-        # 排名表格
+        # 排名表格容器
+        self.table_container = QFrame()
+        self.table_container.setLayout(QVBoxLayout())
+        self.table_container.layout().setContentsMargins(0, 0, 0, 0)
+        self.table_container.layout().setSpacing(0)
+        
+        # 初始显示空状态
         self.table_frame = self._create_table_section_empty()
-        layout.addWidget(self.table_frame)
+        self.table_container.layout().addWidget(self.table_frame)
+        
+        layout.addWidget(self.table_container)
         
         scroll.setWidget(content_widget)
         main_layout.addWidget(scroll)
@@ -752,6 +766,9 @@ class CompositeDimensionTab(QWidget):
                 
                 logger.info(f"✅ 已写入MongoDB: {doc['mapped_count']}/{doc['total_count']} 个主线映射成功")
                 
+                # 同时保存时间维度快照
+                self._save_mainline_time_snapshot(mapped_mainlines, doc["period"])
+                
             except Exception as e:
                 logger.warning(f"⚠️ MongoDB写入失败: {e}，数据已保存到文件")
                 
@@ -759,6 +776,46 @@ class CompositeDimensionTab(QWidget):
             logger.warning(f"⚠️ 模块导入失败: {e}，跳过JQData映射")
         except Exception as e:
             logger.error(f"JQData映射失败: {e}")
+    
+    def _save_mainline_time_snapshot(self, mainlines: list, period_text: str):
+        """保存主线时间维度快照"""
+        try:
+            from core.time_dimension_manager import create_time_dimension_manager, Period
+            
+            # 映射周期文本到Period枚举
+            period_map = {
+                "短期 (1-5天)": Period.SHORT,
+                "中期 (1-4周)": Period.MEDIUM, 
+                "长期 (1月+)": Period.LONG,
+                "short": Period.SHORT,
+                "medium": Period.MEDIUM,
+                "long": Period.LONG
+            }
+            period = period_map.get(period_text, Period.MEDIUM)
+            
+            # 获取市场背景（如果有趋势模块的数据）
+            market_context = {}
+            try:
+                from core.trend_analyzer import create_trend_analyzer
+                # 这里可以添加市场趋势信息
+            except:
+                pass
+            
+            # 保存快照
+            tdm = create_time_dimension_manager()
+            success = tdm.save_mainline_snapshot(
+                mainlines=mainlines,
+                period=period,
+                rotation_signal=None,  # 可后续添加轮动信号
+                market_context=market_context,
+                source="composite_score"
+            )
+            
+            if success:
+                logger.info(f"✅ 主线时间维度快照已保存: {len(mainlines)} 条, 周期={period.value}")
+                
+        except Exception as e:
+            logger.warning(f"保存主线时间维度快照失败: {e}")
     
     def _load_cached_results(self):
         """加载缓存的综合评分结果（初始化时自动调用）"""
@@ -791,21 +848,23 @@ class CompositeDimensionTab(QWidget):
                             name=ml.get("name", ""),
                             type=ml.get("mainline_type", "concept"),
                             total_score=ml.get("total_score", 0),
-                            funds_score=DimensionScore(score=ml.get("funds_score", 0), level="中"),
-                            heat_score=DimensionScore(score=ml.get("heat_score", 0), level="中"),
-                            momentum_score=DimensionScore(score=ml.get("momentum_score", 0), level="中"),
-                            policy_score=DimensionScore(score=ml.get("policy_score", 0), level="中"),
-                            leader_score=DimensionScore(score=ml.get("leader_score", 0), level="中"),
+                            funds_score=DimensionScore(score=ml.get("funds_score", 0)),
+                            heat_score=DimensionScore(score=ml.get("heat_score", 0)),
+                            momentum_score=DimensionScore(score=ml.get("momentum_score", 0)),
+                            policy_score=DimensionScore(score=ml.get("policy_score", 0)),
+                            leader_score=DimensionScore(score=ml.get("leader_score", 0)),
                             leader_stock=ml.get("leader_stock", ""),
                             leader_change=ml.get("leader_change", 0),
                             signal=ml.get("signal", "")
                         )
                         self.results.append(result)
                     
-                    # 更新UI显示
+                    logger.info(f"✅ 解析出 {len(self.results)} 条结果")
+                    
+                    # 更新UI显示 - 替换空表格为有数据的表格
                     if self.results:
-                        self._update_table()
-                        self.status_label.setText(f"📂 已加载缓存数据 ({record_date} {period})")
+                        self._rebuild_table_with_cache()
+                        self.status_label.setText(f"📂 已加载缓存 ({record_date} {period})")
                     return
             
         except Exception as e:
@@ -831,11 +890,11 @@ class CompositeDimensionTab(QWidget):
                             name=s.get("name", ""),
                             type=s.get("mainline_type", "concept"),
                             total_score=s.get("total_score", 0),
-                            funds_score=DimensionScore(score=s.get("funds_score", 0), level="中"),
-                            heat_score=DimensionScore(score=s.get("heat_score", 0), level="中"),
-                            momentum_score=DimensionScore(score=s.get("momentum_score", 0), level="中"),
-                            policy_score=DimensionScore(score=s.get("policy_score", 0), level="中"),
-                            leader_score=DimensionScore(score=s.get("leader_score", 0), level="中"),
+                            funds_score=DimensionScore(score=s.get("funds_score", 0)),
+                            heat_score=DimensionScore(score=s.get("heat_score", 0)),
+                            momentum_score=DimensionScore(score=s.get("momentum_score", 0)),
+                            policy_score=DimensionScore(score=s.get("policy_score", 0)),
+                            leader_score=DimensionScore(score=s.get("leader_score", 0)),
                             leader_stock=s.get("leader_stock", ""),
                             leader_change=s.get("leader_change", 0),
                             signal=s.get("signal", "")
@@ -856,26 +915,37 @@ class CompositeDimensionTab(QWidget):
         self.progress_frame.setVisible(False)
         QMessageBox.warning(self, "错误", f"计算失败: {error}")
     
+    def _rebuild_table_with_cache(self):
+        """重建表格显示缓存数据"""
+        if not self.results:
+            logger.debug("无数据，跳过表格重建")
+            return
+        
+        try:
+            # 清空容器
+            layout = self.table_container.layout()
+            while layout.count():
+                item = layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            
+            # 创建新表格
+            self.table_frame = self._create_table_section()
+            layout.addWidget(self.table_frame)
+            
+            logger.info(f"✅ 缓存表格已重建: {len(self.results)} 条数据")
+            
+        except Exception as e:
+            logger.error(f"重建表格失败: {e}")
+            import traceback
+            traceback.print_exc()
+    
     def _update_table(self):
         """更新表格"""
         if not self.results:
             return
         
-        # 找到父布局
-        scroll = self.findChild(QScrollArea)
-        if scroll:
-            content = scroll.widget()
-            if content:
-                content_layout = content.layout()
-                if content_layout:
-                    # 移除旧表格
-                    old_table = self.table_frame
-                    content_layout.removeWidget(old_table)
-                    old_table.deleteLater()
-                    
-                    # 创建新表格
-                    self.table_frame = self._create_table_section()
-                    content_layout.addWidget(self.table_frame)
+        self._rebuild_table_with_cache()
     
     def _create_table_section(self) -> QFrame:
         """创建排名表格 - 添加更多指标列"""
@@ -1133,18 +1203,40 @@ class CompositeDimensionTab(QWidget):
         self._update_detail(selected_results)
     
     def _generate_radar_chart(self) -> QPixmap:
-        """使用plotly生成雷达图（支持中文，放大2倍）"""
+        """使用matplotlib生成雷达图（稳定可靠）"""
         try:
-            # 放大尺寸（原来450x450，现在900x900）
-            chart_width = 900
-            chart_height = 900
-            
-            # 维度标签（中文）
-            categories = ['资金', '热度', '动量', '政策', '龙头']
+            # 维度标签（英文+中文符号，确保兼容性）
+            categories = ['Funds\n资金', 'Heat\n热度', 'Momentum\n动量', 'Policy\n政策', 'Leader\n龙头']
             N = len(categories)
             
-            # 创建雷达图
-            fig = go.Figure()
+            # 计算角度
+            angles = [n / float(N) * 2 * np.pi for n in range(N)]
+            angles += angles[:1]  # 闭合
+            
+            # 创建图形 - 深色背景
+            fig = Figure(figsize=(8, 8), dpi=100, facecolor='#0d0d14')
+            ax = fig.add_subplot(111, polar=True, facecolor='#0d0d14')
+            
+            # 使用Noto Sans CJK字体（支持中日韩文字）
+            import matplotlib.font_manager as fm
+            
+            # 强制使用CJK字体
+            cjk_fonts = ['Noto Sans CJK JP', 'Noto Sans CJK SC', 'Noto Sans CJK TC', 
+                        'WenQuanYi Micro Hei', 'SimHei', 'Microsoft YaHei']
+            
+            for font_name in cjk_fonts:
+                try:
+                    matching = [f for f in fm.fontManager.ttflist if font_name in f.name]
+                    if matching:
+                        plt.rcParams['font.family'] = 'sans-serif'
+                        plt.rcParams['font.sans-serif'] = [font_name, 'DejaVu Sans']
+                        categories = ['资金', '热度', '动量', '政策', '龙头']  # 纯中文
+                        logger.info(f"雷达图使用字体: {font_name}")
+                        break
+                except:
+                    continue
+            
+            plt.rcParams['axes.unicode_minus'] = False
             
             # 绘制每个选中的主线
             for i, idx in enumerate(sorted(self.selected_indices)):
@@ -1153,75 +1245,58 @@ class CompositeDimensionTab(QWidget):
                     
                 result = self.results[idx]
                 values = [
-                    result.funds_score.score,
-                    result.heat_score.score,
-                    result.momentum_score.score,
-                    result.policy_score.score,
-                    result.leader_score.score,
+                    result.funds_score.score if hasattr(result.funds_score, 'score') else result.funds_score,
+                    result.heat_score.score if hasattr(result.heat_score, 'score') else result.heat_score,
+                    result.momentum_score.score if hasattr(result.momentum_score, 'score') else result.momentum_score,
+                    result.policy_score.score if hasattr(result.policy_score, 'score') else result.policy_score,
+                    result.leader_score.score if hasattr(result.leader_score, 'score') else result.leader_score,
                 ]
+                values += values[:1]  # 闭合
                 
                 color = RADAR_COLORS[i % len(RADAR_COLORS)]
                 
-                # 转换颜色为rgba格式
-                def hex_to_rgba(hex_color, alpha=0.2):
-                    hex_color = hex_color.lstrip('#')
-                    r = int(hex_color[0:2], 16)
-                    g = int(hex_color[2:4], 16)
-                    b = int(hex_color[4:6], 16)
-                    return f'rgba({r}, {g}, {b}, {alpha})'
-                
-                fig.add_trace(go.Scatterpolar(
-                    r=values + [values[0]],  # 闭合
-                    theta=categories + [categories[0]],  # 闭合
-                    fill='toself',
-                    name=result.name,
-                    line=dict(color=color, width=2.5),
-                    marker=dict(size=6, color=color),
-                    fillcolor=hex_to_rgba(color, 0.2),
-                ))
+                # 绘制线条和填充
+                ax.plot(angles, values, 'o-', linewidth=2.5, label=result.name, color=color, markersize=6)
+                ax.fill(angles, values, alpha=0.25, color=color)
             
-            # 设置布局 - 深色主题，高对比度，自适应尺寸
-            fig.update_layout(
-                polar=dict(
-                    radialaxis=dict(
-                        visible=True,
-                        range=[0, 100],
-                        tickmode='linear',
-                        tick0=0,
-                        dtick=20,
-                        tickfont=dict(size=11, color='#cdd6f4'),  # 高对比度文字
-                        gridcolor='#2a2a4a',
-                        linecolor='#3a3a5a',
-                    ),
-                    angularaxis=dict(
-                        tickfont=dict(size=12, color='#ffffff', family='Arial, sans-serif'),  # 高对比度中文
-                        linecolor='#3a3a5a',
-                        gridcolor='#2a2a4a',
-                    ),
-                    bgcolor='#0d0d14',
-                ),
-                paper_bgcolor='#0d0d14',
-                plot_bgcolor='#0d0d14',
-                font=dict(color='#ffffff', size=11, family='Arial, sans-serif'),
-                showlegend=True,
-                legend=dict(
-                    font=dict(size=10, color='#cdd6f4'),
-                    bgcolor='rgba(13, 13, 20, 0.8)',
-                    bordercolor='#2a2a4a',
-                    borderwidth=1,
-                ),
-                width=chart_width,
-                height=chart_height,
-                margin=dict(l=20, r=20, t=20, b=20),
-                autosize=False,
-            )
+            # 设置角度标签
+            ax.set_xticks(angles[:-1])
+            ax.set_xticklabels(categories, fontsize=14, color='#ffffff', fontweight='bold')
             
-            # 转换为图片
-            img_bytes = pio.to_image(fig, format='png', width=450, height=450, scale=2)
+            # 设置径向刻度
+            ax.set_ylim(0, 100)
+            ax.set_yticks([20, 40, 60, 80, 100])
+            ax.set_yticklabels(['20', '40', '60', '80', '100'], fontsize=10, color='#aaaaaa')
+            
+            # 设置网格线颜色
+            ax.spines['polar'].set_color('#3a3a5a')
+            ax.grid(color='#2a2a4a', linestyle='-', linewidth=0.5)
+            
+            # 添加图例
+            if len(self.selected_indices) > 0:
+                legend = ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1), 
+                                   fontsize=10, facecolor='#1a1a2e', edgecolor='#3a3a5a',
+                                   labelcolor='#ffffff')
+            
+            # 调整布局
+            fig.tight_layout(pad=2.0)
             
             # 转换为QPixmap
+            canvas = FigureCanvasAgg(fig)
+            canvas.draw()
+            
+            # 获取图像数据
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', facecolor='#0d0d14', edgecolor='none', 
+                       bbox_inches='tight', pad_inches=0.5)
+            buf.seek(0)
+            
+            # 创建QPixmap
             pixmap = QPixmap()
-            pixmap.loadFromData(img_bytes)
+            pixmap.loadFromData(buf.getvalue())
+            
+            # 关闭图形释放内存
+            plt.close(fig)
             
             return pixmap
             

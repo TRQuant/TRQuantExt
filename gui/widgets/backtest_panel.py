@@ -37,28 +37,36 @@ class BacktestThread(QThread):
         try:
             self.progress.emit(10, "初始化回测引擎...")
             
-            from main import run_backtest
+            from core.backtest_engine import BacktestConfig, create_backtest_engine
+            import pandas as pd
             
-            self.progress.emit(30, "加载数据...")
+            self.progress.emit(20, "准备股票池...")
             
-            # 获取默认股票池
+            # 获取股票池
             securities = self.params.get('securities', [])
             if not securities:
-                # 使用默认股票池
                 securities = self._get_default_securities()
             
-            self.progress.emit(50, "执行回测...")
+            self.progress.emit(30, "创建回测配置...")
             
-            result = run_backtest(
-                strategy_name=self.strategy_name,
+            # 创建回测配置
+            config = BacktestConfig(
                 start_date=self.params.get('start_date'),
                 end_date=self.params.get('end_date'),
-                securities=securities,
-                initial_cash=self.params.get('initial_capital', 1000000),
+                initial_capital=self.params.get('initial_capital', 1000000),
                 commission_rate=self.params.get('commission_rate', 0.0003),
                 slippage=self.params.get('slippage', 0.001),
-                strategy_params=self.params.get('strategy_params', {})
+                rebalance_freq=self.params.get('rebalance_freq', 'monthly')
             )
+            
+            self.progress.emit(50, "执行本地回测...")
+            
+            # 创建简单的等权评分
+            stock_scores = {s: pd.DataFrame({'score': [1.0]}) for s in securities}
+            
+            # 创建并运行回测引擎
+            engine = create_backtest_engine(config)
+            result = engine.run(stock_scores)
             
             self.progress.emit(90, "生成报告...")
             
@@ -67,7 +75,7 @@ class BacktestThread(QThread):
                 return
             
             # 转换结果格式以适配UI
-            formatted_result = self._format_result(result)
+            formatted_result = self._format_backtest_result(result)
             
             self.progress.emit(100, "回测完成")
             self.finished.emit(formatted_result)
@@ -87,8 +95,55 @@ class BacktestThread(QThread):
             '600036.XSHG',  # 招商银行
         ]
     
-    def _format_result(self, result: dict) -> dict:
-        """格式化回测结果"""
+    def _format_backtest_result(self, result) -> dict:
+        """格式化新版回测引擎结果"""
+        from core.backtest_engine import BacktestResult
+        
+        if not isinstance(result, BacktestResult):
+            return self._format_result_legacy(result)
+        
+        metrics = result.metrics
+        
+        formatted = {
+            'metrics': {
+                'total_return': metrics.total_return,
+                'annual_return': metrics.annual_return,
+                'sharpe_ratio': metrics.sharpe_ratio,
+                'max_drawdown': metrics.max_drawdown,
+                'win_rate': metrics.win_rate,
+                'total_trades': metrics.trade_count,
+                'profit_loss_ratio': metrics.profit_loss_ratio,
+                'volatility': metrics.volatility,
+                'benchmark_return': metrics.benchmark_return,
+                'calmar_ratio': metrics.calmar_ratio,
+                'sortino_ratio': metrics.sortino_ratio,
+            },
+            'trades': [],
+            'equity_curve': result.equity_curve.to_dict() if hasattr(result.equity_curve, 'to_dict') else {},
+            'summary': {
+                'run_time': result.run_time,
+                'start_date': result.config.start_date,
+                'end_date': result.config.end_date,
+                'initial_capital': result.config.initial_capital,
+            },
+        }
+        
+        # 格式化交易记录
+        for trade in result.trades:
+            formatted['trades'].append({
+                'date': trade.date,
+                'code': trade.stock_code,
+                'direction': '买入' if trade.direction == 'buy' else '卖出',
+                'price': trade.price,
+                'quantity': trade.quantity,
+                'amount': trade.amount,
+                'pnl': trade.pnl,
+            })
+        
+        return formatted
+    
+    def _format_result_legacy(self, result: dict) -> dict:
+        """格式化旧版回测结果（兼容）"""
         metrics = result.get('metrics', {})
         summary = result.get('summary', {})
         
@@ -195,12 +250,12 @@ class BacktestPanel(QWidget):
     def init_ui(self):
         """初始化界面"""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(32, 32, 32, 32)
-        layout.setSpacing(24)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(20)
         
-        # === 标题栏 ===
-        header = self.create_header()
-        layout.addLayout(header)
+        # === 模块Banner ===
+        banner = self._create_module_banner()
+        layout.addWidget(banner)
         
         # === 主分割器 ===
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -222,35 +277,52 @@ class BacktestPanel(QWidget):
         splitter.setSizes([320, 800])
         layout.addWidget(splitter)
     
-    def create_header(self) -> QHBoxLayout:
-        """创建标题栏"""
-        header = QHBoxLayout()
+    def _create_module_banner(self) -> QFrame:
+        """创建模块Banner（与其他模块保持一致的渐变透明风格）"""
+        frame = QFrame()
+        frame.setStyleSheet(f"""
+            QFrame {{
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #1E2A5E,
+                    stop:1 #2E4A8E
+                );
+                border-radius: 16px;
+                border: 1px solid {Colors.MODULE_BACKTEST_START}40;
+            }}
+        """)
         
-        # 标题
-        title_widget = QWidget()
-        title_layout = QVBoxLayout(title_widget)
-        title_layout.setContentsMargins(0, 0, 0, 0)
-        title_layout.setSpacing(4)
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(32, 28, 32, 28)
         
-        title = QLabel("📊 回测验证")
+        # 左侧文字
+        text_layout = QVBoxLayout()
+        text_layout.setSpacing(12)
+        
+        title = QLabel("🔄 回测验证")
         title.setStyleSheet(f"""
-            font-size: 28px;
-            font-weight: 700;
+            font-size: 24px;
+            font-weight: 800;
             color: {Colors.TEXT_PRIMARY};
         """)
-        title_layout.addWidget(title)
+        text_layout.addWidget(title)
         
-        subtitle = QLabel("策略回测 · 风控检查 · 绩效分析")
+        subtitle = QLabel(
+            "策略回测 · 风控检查 · 绩效分析 · 收益归因\n"
+            "验证策略在历史数据上的表现，评估风险收益特征"
+        )
         subtitle.setStyleSheet(f"""
-            font-size: 14px;
+            font-size: 13px;
             color: {Colors.TEXT_MUTED};
+            line-height: 1.6;
         """)
-        title_layout.addWidget(subtitle)
+        subtitle.setWordWrap(True)
+        text_layout.addWidget(subtitle)
         
-        header.addWidget(title_widget)
-        header.addStretch()
+        layout.addLayout(text_layout)
+        layout.addStretch()
         
-        return header
+        return frame
     
     def create_config_panel(self) -> QFrame:
         """创建配置面板"""
@@ -505,6 +577,10 @@ class BacktestPanel(QWidget):
             }}
         """)
         
+        # 策略生成（新增）
+        strategy_tab = self.create_strategy_tab()
+        tabs.addTab(strategy_tab, "🧩 策略生成")
+        
         # 收益曲线
         curve_tab = self.create_curve_tab()
         tabs.addTab(curve_tab, "📈 收益曲线")
@@ -525,26 +601,370 @@ class BacktestPanel(QWidget):
         
         return panel
     
+    def create_strategy_tab(self) -> QWidget:
+        """创建策略生成标签页"""
+        tab = QWidget()
+        main_layout = QVBoxLayout(tab)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # 滚动区域
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(f"QScrollArea {{ border: none; background-color: {Colors.BG_SECONDARY}; }}")
+        
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(20)
+        
+        # 标题
+        title = QLabel("🧩 多因子策略生成器")
+        title.setStyleSheet(f"font-size: 18px; font-weight: 700; color: {Colors.TEXT_PRIMARY};")
+        layout.addWidget(title)
+        
+        desc = QLabel("选择预设模板或自定义因子组合，一键生成PTrade/QMT可执行策略代码")
+        desc.setStyleSheet(f"color: {Colors.TEXT_MUTED}; font-size: 13px;")
+        layout.addWidget(desc)
+        
+        # 模板选择区
+        template_frame = QFrame()
+        template_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {Colors.BG_TERTIARY};
+                border: 1px solid {Colors.BORDER_PRIMARY};
+                border-radius: 12px;
+            }}
+        """)
+        template_layout = QVBoxLayout(template_frame)
+        template_layout.setContentsMargins(20, 16, 20, 16)
+        template_layout.setSpacing(12)
+        
+        template_title = QLabel("📋 策略模板")
+        template_title.setStyleSheet(f"font-size: 15px; font-weight: 600; color: {Colors.TEXT_PRIMARY};")
+        template_layout.addWidget(template_title)
+        
+        # 模板按钮
+        templates_grid = QGridLayout()
+        templates_grid.setSpacing(12)
+        
+        templates = [
+            ("value_growth", "💎 价值成长", "低估值+高成长，适合牛市", "#10B981"),
+            ("momentum", "🚀 动量策略", "追涨强势股，适合趋势市", "#3B82F6"),
+            ("low_vol_value", "🛡️ 低波价值", "低波动+高股息，熊市防守", "#F59E0B"),
+            ("quality_growth", "⭐ 质量成长", "高质量+高成长，震荡市", "#8B5CF6"),
+        ]
+        
+        for i, (tid, name, desc, color) in enumerate(templates):
+            btn = QPushButton(f"{name}\n{desc}")
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {Colors.BG_PRIMARY};
+                    color: {Colors.TEXT_PRIMARY};
+                    border: 2px solid {color}40;
+                    border-radius: 10px;
+                    padding: 16px;
+                    text-align: left;
+                    font-size: 13px;
+                }}
+                QPushButton:hover {{
+                    border-color: {color};
+                    background-color: {color}10;
+                }}
+            """)
+            btn.clicked.connect(lambda checked, t=tid: self._load_template(t))
+            templates_grid.addWidget(btn, i // 2, i % 2)
+        
+        template_layout.addLayout(templates_grid)
+        layout.addWidget(template_frame)
+        
+        # 配置区
+        config_frame = QFrame()
+        config_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {Colors.BG_TERTIARY};
+                border: 1px solid {Colors.BORDER_PRIMARY};
+                border-radius: 12px;
+            }}
+        """)
+        config_layout = QVBoxLayout(config_frame)
+        config_layout.setContentsMargins(20, 16, 20, 16)
+        config_layout.setSpacing(12)
+        
+        config_title = QLabel("⚙️ 策略配置")
+        config_title.setStyleSheet(f"font-size: 15px; font-weight: 600; color: {Colors.TEXT_PRIMARY};")
+        config_layout.addWidget(config_title)
+        
+        # 配置表格
+        config_grid = QGridLayout()
+        config_grid.setSpacing(12)
+        
+        # 调仓频率
+        config_grid.addWidget(QLabel("调仓频率:"), 0, 0)
+        self.rebalance_combo = QComboBox()
+        self.rebalance_combo.addItems(["日度", "周度", "双周", "月度", "季度"])
+        self.rebalance_combo.setCurrentIndex(3)
+        config_grid.addWidget(self.rebalance_combo, 0, 1)
+        
+        # 持仓上限
+        config_grid.addWidget(QLabel("持仓上限:"), 0, 2)
+        self.position_limit_spin = QSpinBox()
+        self.position_limit_spin.setRange(5, 50)
+        self.position_limit_spin.setValue(20)
+        config_grid.addWidget(self.position_limit_spin, 0, 3)
+        
+        # 止损阈值
+        config_grid.addWidget(QLabel("止损阈值:"), 1, 0)
+        self.stop_loss_spin = QDoubleSpinBox()
+        self.stop_loss_spin.setRange(0.01, 0.30)
+        self.stop_loss_spin.setValue(0.08)
+        self.stop_loss_spin.setSingleStep(0.01)
+        self.stop_loss_spin.setSuffix(" %")
+        config_grid.addWidget(self.stop_loss_spin, 1, 1)
+        
+        # 止盈阈值
+        config_grid.addWidget(QLabel("止盈阈值:"), 1, 2)
+        self.take_profit_spin = QDoubleSpinBox()
+        self.take_profit_spin.setRange(0.05, 1.00)
+        self.take_profit_spin.setValue(0.20)
+        self.take_profit_spin.setSingleStep(0.05)
+        self.take_profit_spin.setSuffix(" %")
+        config_grid.addWidget(self.take_profit_spin, 1, 3)
+        
+        config_layout.addLayout(config_grid)
+        layout.addWidget(config_frame)
+        
+        # 生成按钮
+        btn_layout = QHBoxLayout()
+        
+        generate_btn = QPushButton("🔧 生成策略代码")
+        generate_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.PRIMARY};
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 14px 32px;
+                font-size: 14px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.PRIMARY}dd;
+            }}
+        """)
+        generate_btn.clicked.connect(self._generate_strategy)
+        btn_layout.addWidget(generate_btn)
+        
+        save_btn = QPushButton("💾 保存策略")
+        save_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.SUCCESS};
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 14px 32px;
+                font-size: 14px;
+                font-weight: 600;
+            }}
+        """)
+        save_btn.clicked.connect(self._save_strategy)
+        btn_layout.addWidget(save_btn)
+        
+        view_btn = QPushButton("📊 查看代码")
+        view_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.BG_TERTIARY};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER_PRIMARY};
+                border-radius: 8px;
+                padding: 14px 32px;
+                font-size: 14px;
+            }}
+        """)
+        view_btn.clicked.connect(self._view_strategy_code)
+        btn_layout.addWidget(view_btn)
+        
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+        
+        # 代码预览
+        self.strategy_code = QTextEdit()
+        self.strategy_code.setReadOnly(True)
+        self.strategy_code.setMinimumHeight(300)
+        self.strategy_code.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: #1a1a2e;
+                color: #e0e0e0;
+                border: 1px solid {Colors.BORDER_PRIMARY};
+                border-radius: 8px;
+                font-family: 'Consolas', 'Monaco', monospace;
+                font-size: 12px;
+                padding: 12px;
+            }}
+        """)
+        self.strategy_code.setPlaceholderText("点击\"生成策略代码\"查看生成的PTrade策略...")
+        layout.addWidget(self.strategy_code)
+        
+        layout.addStretch()
+        scroll.setWidget(content)
+        main_layout.addWidget(scroll)
+        
+        # 初始化
+        self._current_template = None
+        
+        return tab
+    
+    def _load_template(self, template_id: str):
+        """加载策略模板"""
+        try:
+            from core.strategy_generator import get_strategy_generator
+            
+            generator = get_strategy_generator()
+            config = generator.get_template(template_id)
+            
+            if config:
+                self._current_template = config
+                
+                # 更新UI
+                freq_map = {'daily': 0, 'weekly': 1, 'biweekly': 2, 'monthly': 3, 'quarterly': 4}
+                self.rebalance_combo.setCurrentIndex(freq_map.get(config.rebalance.frequency.value, 3))
+                self.position_limit_spin.setValue(config.rebalance.position_limit)
+                self.stop_loss_spin.setValue(config.stop_loss.threshold * 100)
+                self.take_profit_spin.setValue(config.take_profit.threshold * 100)
+                
+                # 显示提示
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.information(self, "模板已加载", f"已加载模板: {config.name}\n\n{config.description}")
+                
+        except Exception as e:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "加载失败", f"错误: {e}")
+    
+    def _generate_strategy(self):
+        """生成策略代码"""
+        try:
+            from core.strategy_generator import get_strategy_generator, StrategyConfig, RebalanceConfig, RebalanceFreq, StopLossConfig, StopLossType, TakeProfitConfig, TakeProfitType
+            
+            generator = get_strategy_generator()
+            
+            # 使用模板或创建新配置
+            if self._current_template:
+                config = self._current_template
+            else:
+                # 默认价值成长
+                config = generator.get_template('value_growth')
+            
+            # 应用UI配置
+            freq_map = {0: RebalanceFreq.DAILY, 1: RebalanceFreq.WEEKLY, 2: RebalanceFreq.BIWEEKLY, 3: RebalanceFreq.MONTHLY, 4: RebalanceFreq.QUARTERLY}
+            config.rebalance.frequency = freq_map.get(self.rebalance_combo.currentIndex(), RebalanceFreq.MONTHLY)
+            config.rebalance.position_limit = self.position_limit_spin.value()
+            config.stop_loss.threshold = self.stop_loss_spin.value() / 100
+            config.take_profit.threshold = self.take_profit_spin.value() / 100
+            
+            # 生成代码
+            code = generator.create_strategy(config)
+            self.strategy_code.setText(code)
+            self._generated_code = code
+            self._generated_config = config
+            
+        except Exception as e:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "生成失败", f"错误: {e}")
+    
+    def _save_strategy(self):
+        """保存策略到文件"""
+        if not hasattr(self, '_generated_code') or not self._generated_code:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "提示", "请先生成策略代码")
+            return
+        
+        from PyQt6.QtWidgets import QFileDialog
+        
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "保存策略",
+            f"strategy_{datetime.now().strftime('%Y%m%d_%H%M%S')}.py",
+            "Python文件 (*.py)"
+        )
+        
+        if file_path:
+            try:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(self._generated_code)
+                
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.information(self, "保存成功", f"策略已保存到:\n{file_path}")
+                
+            except Exception as e:
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.warning(self, "保存失败", f"错误: {e}")
+    
+    def _view_strategy_code(self):
+        """在弹出窗口中查看策略代码"""
+        code = self.strategy_code.toPlainText()
+        if not code or "点击" in code:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "提示", "请先生成策略代码")
+            return
+        
+        from gui.widgets.data_viewer import show_data_viewer
+        show_data_viewer(
+            parent=self,
+            title="策略代码",
+            data=code
+        )
+    
     def create_curve_tab(self) -> QWidget:
         """创建收益曲线标签页"""
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(24, 24, 24, 24)
         
-        # 图表占位
-        self.chart_placeholder = QLabel("运行回测后显示收益曲线")
-        self.chart_placeholder.setStyleSheet(f"""
-            background-color: {Colors.BG_SECONDARY};
-            color: {Colors.TEXT_MUTED};
-            border: 1px dashed {Colors.BORDER_PRIMARY};
-            border-radius: 8px;
-            font-size: 14px;
-        """)
-        self.chart_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.chart_placeholder.setMinimumHeight(400)
-        layout.addWidget(self.chart_placeholder)
+        # 工具栏
+        toolbar = QHBoxLayout()
+        
+        export_btn = QPushButton("📷 导出图片")
+        export_btn.clicked.connect(self._export_chart)
+        toolbar.addWidget(export_btn)
+        
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
+        
+        # 图表组件
+        try:
+            from gui.widgets.equity_chart import EquityChartWidget
+            self.equity_chart = EquityChartWidget()
+            self.equity_chart.setMinimumHeight(500)
+            layout.addWidget(self.equity_chart)
+            self.chart_placeholder = None
+        except Exception as e:
+            logger.warning(f"图表组件加载失败: {e}")
+            # 回退到占位符
+            self.chart_placeholder = QLabel("运行回测后显示收益曲线")
+            self.chart_placeholder.setStyleSheet(f"""
+                background-color: {Colors.BG_SECONDARY};
+                color: {Colors.TEXT_MUTED};
+                border: 1px dashed {Colors.BORDER_PRIMARY};
+                border-radius: 8px;
+                font-size: 14px;
+            """)
+            self.chart_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.chart_placeholder.setMinimumHeight(400)
+            layout.addWidget(self.chart_placeholder)
+            self.equity_chart = None
         
         return tab
+    
+    def _export_chart(self):
+        """导出图表"""
+        if hasattr(self, 'equity_chart') and self.equity_chart:
+            from PyQt6.QtWidgets import QFileDialog
+            filename, _ = QFileDialog.getSaveFileName(
+                self, "导出图表", "", "PNG图片 (*.png);;所有文件 (*)"
+            )
+            if filename:
+                self.equity_chart.export_to_image(filename)
+                QMessageBox.information(self, "成功", f"图表已导出: {filename}")
     
     def create_trades_tab(self) -> QWidget:
         """创建交易记录标签页"""
@@ -853,8 +1273,46 @@ class BacktestPanel(QWidget):
         trades = result.get('trades', [])
         self.update_trades_table(trades)
         
+        # 更新净值曲线
+        self.update_equity_chart(result)
+        
         # 更新报告预览
         self.update_report_preview(result)
+    
+    def update_equity_chart(self, result: dict):
+        """更新净值曲线图表"""
+        if not hasattr(self, 'equity_chart') or self.equity_chart is None:
+            return
+        
+        equity_data = result.get('equity_curve', {})
+        
+        if not equity_data:
+            return
+        
+        try:
+            import pandas as pd
+            
+            # 构建DataFrame
+            if isinstance(equity_data, dict):
+                # 从字典构建
+                if 'equity' in equity_data:
+                    df = pd.DataFrame(equity_data)
+                    if 'date' in df.columns:
+                        df['date'] = pd.to_datetime(df['date'])
+                        df.set_index('date', inplace=True)
+                else:
+                    # 尝试其它格式
+                    df = pd.DataFrame(equity_data)
+            elif isinstance(equity_data, pd.DataFrame):
+                df = equity_data
+            else:
+                logger.warning(f"无法解析净值数据: {type(equity_data)}")
+                return
+            
+            self.equity_chart.plot_equity_curve(df, title="策略回测净值曲线")
+            
+        except Exception as e:
+            logger.error(f"更新净值曲线失败: {e}")
     
     def update_trades_table(self, trades: list):
         """更新交易记录表格"""
@@ -931,4 +1389,31 @@ class BacktestPanel(QWidget):
             QMessageBox.warning(self, "提示", "请先运行回测")
             return
         
-        QMessageBox.information(self, "提示", "报告已保存到 results 目录")
+        from PyQt6.QtWidgets import QFileDialog
+        
+        # 选择保存路径
+        filename, _ = QFileDialog.getSaveFileName(
+            self, 
+            "导出回测报告", 
+            f"回测报告_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+            "PDF文件 (*.pdf);;文本文件 (*.txt);;所有文件 (*)"
+        )
+        
+        if not filename:
+            return
+        
+        try:
+            from core.report_generator import generate_backtest_report
+            
+            strategy_name = self.strategy_combo.currentText() or "多因子选股策略"
+            output_path = generate_backtest_report(
+                self.current_result,
+                output_path=filename,
+                strategy_name=strategy_name
+            )
+            
+            QMessageBox.information(self, "成功", f"报告已导出: {output_path}")
+            
+        except Exception as e:
+            logger.error(f"导出报告失败: {e}")
+            QMessageBox.warning(self, "错误", f"导出失败: {e}")

@@ -61,6 +61,45 @@ class Colors:
     CHART_4 = "#f38ba8"
     CHART_5 = "#89b4fa"
     CHART_6 = "#cba6f7"
+    
+    # ========== 模块主题色 ==========
+    # 每个模块独特的渐变色，用于Banner区分
+    
+    # 工作台 - 紫蓝渐变（品牌色）
+    MODULE_HOME_START = "#667eea"
+    MODULE_HOME_END = "#764ba2"
+    
+    # 信息获取 - 青蓝渐变（信息/数据感）
+    MODULE_DATA_START = "#0891b2"
+    MODULE_DATA_END = "#0ea5e9"
+    
+    # 市场趋势 - 翠绿渐变（趋势/成长感）
+    MODULE_TREND_START = "#059669"
+    MODULE_TREND_END = "#10b981"
+    
+    # 投资主线 - 橙红渐变（热度/焦点感）
+    MODULE_MAINLINE_START = "#ea580c"
+    MODULE_MAINLINE_END = "#f97316"
+    
+    # 候选池 - 紫粉渐变（筛选/精选感）
+    MODULE_POOL_START = "#9333ea"
+    MODULE_POOL_END = "#a855f7"
+    
+    # 因子构建 - 蓝绿渐变（科技/量化感）
+    MODULE_FACTOR_START = "#0284c7"
+    MODULE_FACTOR_END = "#06b6d4"
+    
+    # 策略开发 - 金黄渐变（价值/策略感）
+    MODULE_STRATEGY_START = "#ca8a04"
+    MODULE_STRATEGY_END = "#eab308"
+    
+    # 回测验证 - 靛蓝渐变（验证/测试感）
+    MODULE_BACKTEST_START = "#4f46e5"
+    MODULE_BACKTEST_END = "#6366f1"
+    
+    # 实盘交易 - 红橙渐变（实战/交易感）
+    MODULE_TRADING_START = "#dc2626"
+    MODULE_TRADING_END = "#ef4444"
 
 
 class Typography:

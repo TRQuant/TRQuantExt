@@ -4,6 +4,7 @@
 
 根据《Alpha因子模块集成方案设计》和《补充因子构建模块完善建议》，实现了完整的因子工程模块，包括：
 
+- **因子推荐引擎**：基于市场环境和候选池特征，智能推荐因子组合（新增v2.2.0）
 - **因子计算**：提供价值、成长、质量、动量、资金流、规模、波动率、流动性八大类因子
 - **因子验证**：IC/IR计算、分组回测、因子有效性检验
 - **因子中性化**：行业中性化、市值中性化
@@ -14,6 +15,20 @@
 - **自动化流水线**：定期计算、存储、监控
 - **候选池集成**：与主线选股无缝对接
 
+## 工作流程
+
+```
+1. 方法论学习 (📖 方法论) → 了解Alpha工程基础
+           ↓
+2. 因子库浏览 (📚 因子库, 🏆 经典因子) → 熟悉可用因子
+           ↓
+3. 智能推荐 (🧠 因子推荐) → 根据市场环境推荐因子组合【核心步骤】
+           ↓
+4. 因子筛选 (🔍 因子筛选) → 基于候选池进行因子筛选
+           ↓
+5. 因子计算 (🔧 因子计算) → 计算因子值并生成策略
+```
+
 ## 目录结构
 
 ```
@@ -23,18 +38,78 @@ core/factors/
 ├── factor_manager.py        # 因子管理器
 ├── factor_evaluator.py      # 因子验证评估
 ├── factor_storage.py        # MongoDB/文件存储
-├── factor_neutralizer.py    # 因子中性化（新增）
-├── factor_pipeline.py       # 自动化流水线（新增）
+├── factor_neutralizer.py    # 因子中性化
+├── factor_pipeline.py       # 自动化流水线
 ├── factor_pool_integration.py  # 候选池集成
-├── extended_factors.py      # 扩展因子（新增）
+├── extended_factors.py      # 扩展因子
 ├── value_factors.py         # 价值因子
 ├── growth_factors.py        # 成长因子
 ├── quality_factors.py       # 质量因子
 ├── momentum_factors.py      # 动量因子
 └── flow_factors.py          # 资金流因子
 
+core/
+├── ai_analyzer.py           # AI智能分析器（因子推荐）
+
+gui/widgets/
+├── factor_builder_panel.py  # 因子构建面板
+├── factor_recommend_tab.py  # 因子推荐标签页（新增v2.2.0）
+└── factor_filter_tab.py     # 因子筛选标签页
+
 tests/
-└── test_factors_real.py     # 因子真实数据测试（新增）
+└── test_factors_real.py     # 因子真实数据测试
+```
+
+## 因子推荐引擎（新增v2.2.0）
+
+### 工作原理
+
+因子推荐引擎基于三个维度进行分析：
+
+1. **市场环境分析**：
+   - 分析大盘趋势（牛市/熊市/震荡/复苏）
+   - 评估成交量变化
+   - 判断资金面状态
+
+2. **候选池特征分析**：
+   - 统计行业分布
+   - 识别主导行业类型
+   - 估算平均市值
+
+3. **投资周期考量**：
+   - 短期策略：侧重动量、资金流、反转
+   - 中期策略：均衡配置
+   - 长期策略：侧重价值、成长、质量
+
+### 市场环境因子映射
+
+| 市场环境 | 推荐因子 | 避免因子 |
+|---------|---------|---------|
+| 牛市上涨 | 动量、成长、资金流 | 反转、低波动 |
+| 熊市下跌 | 价值、质量、低波动 | 动量、小盘 |
+| 震荡盘整 | 反转、质量、流动性 | 长周期动量 |
+| 触底反弹 | 短期动量、成长、资金流 | 高股息、低波动 |
+
+### 使用示例
+
+```python
+from core.ai_analyzer import AIAnalyzer
+
+analyzer = AIAnalyzer(model_type='rule')  # 或 'openai', 'local'
+
+result = analyzer.recommend_factors(
+    market_trend='bull',
+    pool_characteristics={
+        'stock_count': 50,
+        'main_industry_type': '科技',
+        'industry_distribution': {'人工智能': 15, '芯片': 12}
+    },
+    period='medium'
+)
+
+print(f"推荐因子: {result.recommended_factors}")
+print(f"应避免: {result.avoid_factors}")
+print(f"建议开发: {result.development_needs}")
 ```
 
 ## 因子分类
