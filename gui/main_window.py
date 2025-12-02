@@ -205,8 +205,8 @@ class MainWindow(QMainWindow):
         self.content_stack.addWidget(self.home_page)
         self._panels_loaded[0] = True
         
-        # 1-9: 创建占位符，延迟加载
-        for i in range(1, 10):
+        # 1-11: 创建占位符，延迟加载
+        for i in range(1, 12):
             placeholder = QWidget()
             placeholder.setStyleSheet(f"background-color: {Colors.BG_SECONDARY};")
             self.content_stack.addWidget(placeholder)
@@ -348,8 +348,9 @@ class MainWindow(QMainWindow):
         layout.addSpacing(8)
         
         sys_items = [
-            ("⚙️", "系统设置", 9),
-            ("📋", "运行日志", 10),
+            ("📁", "数据管理", 9),     # 文件管理系统
+            ("⚙️", "系统设置", 10),
+            ("📋", "运行日志", 11),
         ]
         
         self.sys_nav_start_index = len(self.nav_buttons)  # 记录系统按钮起始索引
@@ -846,7 +847,8 @@ class MainWindow(QMainWindow):
         # 更新导航按钮选中状态
         # 页面索引与导航按钮索引现在是一致的：
         # 0: 工作台, 1: 信息获取, 2: 市场趋势, 3: 投资主线, 4: 候选池
-        # 5: 因子构建, 6: 策略开发, 7: 回测验证, 8: 实盘交易, 9: 系统设置, 10: 运行日志
+        # 5: 因子构建, 6: 策略开发, 7: 回测验证, 8: 实盘交易
+        # 9: 数据管理, 10: 系统设置, 11: 运行日志
         for i, btn in enumerate(self.nav_buttons):
             btn.setChecked(i == index)
     
@@ -907,14 +909,19 @@ class MainWindow(QMainWindow):
                 new_widget = TradingPanel()
                 self.trading_panel = new_widget
                 
-            elif index == 9:  # 系统设置
+            elif index == 9:  # 数据管理
+                from gui.widgets.data_manager_panel import DataManagerPanel
+                new_widget = DataManagerPanel()
+                self.data_manager_panel = new_widget
+                
+            elif index == 10:  # 系统设置
                 from gui.widgets.system_panel import SystemPanel
                 new_widget = SystemPanel()
                 new_widget.system_started.connect(self.on_system_started)
                 new_widget.system_stopped.connect(self.on_system_stopped)
                 self.system_panel = new_widget
                 
-            elif index == 10:  # 运行日志
+            elif index == 11:  # 运行日志
                 new_widget = self.create_log_panel()
                 self.log_panel = new_widget
             
@@ -944,8 +951,9 @@ class MainWindow(QMainWindow):
             6: "策略开发",
             7: "回测验证",
             8: "实盘交易",
-            9: "系统设置",
-            10: "运行日志",
+            9: "数据管理",
+            10: "系统设置",
+            11: "运行日志",
         }
         return page_names.get(index, f"页面{index}")
     
