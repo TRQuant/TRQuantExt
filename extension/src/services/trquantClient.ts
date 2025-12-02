@@ -1,86 +1,93 @@
 /**
  * TRQuant Client
- * 与Python后端通信的客户端
+ * ==============
  * 
- * 支持两种通信方式：
- * 1. 子进程 + JSON over stdio（本地开发）
- * 2. HTTP API（服务器部署）
+ * 与Python后端通信的客户端服务
+ * 
+ * 职责:
+ * - 封装与bridge.py的通信
+ * - 提供类型安全的API方法
+ * - 处理超时和错误
+ * 
+ * 遵循:
+ * - 单一职责原则
+ * - 依赖注入
+ * - 接口隔离
  */
 
 import * as vscode from 'vscode';
 import * as cp from 'child_process';
 import * as path from 'path';
-import axios from 'axios';
+import * as os from 'os';
 
-export interface TRQuantResponse<T = any> {
-    ok: boolean;
-    data?: T;
-    error?: string;
+import { logger } from '../utils/logger';
+import { config, ConfigManager } from '../utils/config';
+import { 
+    TRQuantError, 
+    ErrorCode, 
+    PythonError, 
+    ErrorHandler 
+} from '../utils/errors';
+import {
+    ApiResponse,
+    MarketStatus,
+    Mainline,
+    Factor,
+    Strategy,
+    BacktestResult,
+    RiskAssessment,
+    GetMarketStatusParams,
+    GetMainlinesParams,
+    RecommendFactorsParams,
+    GenerateStrategyParams,
+    AnalyzeBacktestParams,
+    RiskAssessmentParams
+} from '../types';
+
+/**
+ * Bridge请求接口
+ */
+interface BridgeRequest {
+    action: string;
+    params: Record<string, any>;
 }
 
-export interface MarketStatus {
-    regime: string;
-    index_trend: Record<string, { zscore: number; trend: string }>;
-    style_rotation: Array<{ style: string; score: number }>;
-    summary: string;
-}
-
-export interface Mainline {
-    name: string;
-    score: number;
-    industries: string[];
-    logic: string;
-}
-
-export interface Factor {
-    name: string;
-    category: string;
-    weight: number;
-    reason: string;
-}
-
-export interface Strategy {
-    code: string;
-    name: string;
-    description: string;
-    factors: string[];
-    risk_params: Record<string, any>;
-}
-
+/**
+ * TRQuant客户端类
+ */
 export class TRQuantClient {
-    private context: vscode.ExtensionContext;
-    private bridgeProcess: cp.ChildProcess | null = null;
-    private useHttp: boolean = false;
+    private readonly MODULE = 'TRQuantClient';
+    private extensionPath: string;
+    private configManager: ConfigManager;
 
     constructor(context: vscode.ExtensionContext) {
-        this.context = context;
-        this.initClient();
+        this.extensionPath = context.extensionPath;
+        this.configManager = ConfigManager.getInstance();
+        logger.info('TRQuantClient初始化完成', this.MODULE);
     }
 
-    private initClient() {
-        const config = vscode.workspace.getConfiguration('trquant');
-        // 检查是否有HTTP服务可用，否则使用子进程
-        this.useHttp = false; // 默认使用子进程模式
-    }
+    // ==================== 公共API方法 ====================
 
     /**
      * 获取市场状态
      */
-    async getMarketStatus(params?: {
-        universe?: string;
-        as_of?: string;
-    }): Promise<TRQuantResponse<MarketStatus>> {
-        return this.callBridge('get_market_status', params || {});
+    async getMarketStatus(
+        params?: GetMarketStatusParams
+    ): Promise<ApiResponse<MarketStatus>> {
+        return this.callBridge<MarketStatus>('get_market_status', {
+            universe: params?.universe || 'CN_EQ',
+            as_of: params?.as_of || this.getTodayDate(),
+            lookback_days: params?.lookback_days || 60
+        });
     }
 
     /**
      * 获取投资主线
      */
-    async getMainlines(params?: {
-        top_n?: number;
-        time_horizon?: string;
-    }): Promise<TRQuantResponse<Mainline[]>> {
-        return this.callBridge('get_mainlines', {
+    async getMainlines(
+        params?: GetMainlinesParams
+    ): Promise<ApiResponse<Mainline[]>> {
+        return this.callBridge<Mainline[]>('get_mainlines', {
             top_n: params?.top_n || 20,
             time_horizon: params?.time_horizon || 'short'
         });
@@ -89,169 +96,218 @@ export class TRQuantClient {
     /**
      * 推荐因子
      */
-    async recommendFactors(params?: {
-        market_regime?: string;
-        mainlines?: string[];
-    }): Promise<TRQuantResponse<Factor[]>> {
-        return this.callBridge('recommend_factors', params || {});
+    async recommendFactors(
+        params?: RecommendFactorsParams
+    ): Promise<ApiResponse<Factor[]>> {
+        return this.callBridge<Factor[]>('recommend_factors', {
+            market_regime: params?.market_regime,
+            mainlines: params?.mainlines,
+            top_n: params?.top_n || 10
+        });
     }
 
     /**
      * 生成策略代码
-     * @param platform 平台：'ptrade' 或 'qmt'
      */
-    async generateStrategy(params: {
-        factors: string[];
-        style?: string;
-        platform?: string;
-        risk_params?: Record<string, any>;
-    }): Promise<TRQuantResponse<Strategy>> {
-        return this.callBridge('generate_strategy', {
-            ...params,
-            platform: params.platform || 'ptrade'
+    async generateStrategy(
+        params: GenerateStrategyParams
+    ): Promise<ApiResponse<Strategy>> {
+        // 验证必需参数
+        ErrorHandler.validateRequired(params, ['factors']);
+        
+        const riskParams = {
+            max_position: params.risk_params?.max_position || 
+                this.configManager.get('defaultRiskParams').maxPosition,
+            stop_loss: params.risk_params?.stop_loss || 
+                this.configManager.get('defaultRiskParams').stopLoss,
+            take_profit: params.risk_params?.take_profit || 
+                this.configManager.get('defaultRiskParams').takeProfit
+        };
+
+        return this.callBridge<Strategy>('generate_strategy', {
+            factors: params.factors,
+            style: params.style || this.configManager.get('defaultStyle'),
+            platform: params.platform || this.configManager.get('defaultPlatform'),
+            risk_params: riskParams
         });
     }
 
     /**
      * 分析回测结果
      */
-    async analyzeBacktest(params: {
-        backtest_file?: string;
-        backtest_data?: any;
-    }): Promise<TRQuantResponse<any>> {
-        return this.callBridge('analyze_backtest', params);
+    async analyzeBacktest(
+        params: AnalyzeBacktestParams
+    ): Promise<ApiResponse<BacktestResult>> {
+        return this.callBridge<BacktestResult>('analyze_backtest', params);
     }
 
     /**
      * 风险评估
      */
-    async assessRisk(params: {
-        portfolio: any;
-    }): Promise<TRQuantResponse<any>> {
-        return this.callBridge('risk_assessment', params);
+    async assessRisk(
+        params: RiskAssessmentParams
+    ): Promise<ApiResponse<RiskAssessment>> {
+        ErrorHandler.validateRequired(params, ['portfolio']);
+        return this.callBridge<RiskAssessment>('risk_assessment', params);
     }
+
+    /**
+     * 健康检查
+     */
+    async healthCheck(): Promise<boolean> {
+        try {
+            const result = await this.callBridge('health_check', {});
+            return result.ok;
+        } catch {
+            return false;
+        }
+    }
+
+    // ==================== 私有方法 ====================
 
     /**
      * 调用Python Bridge
      */
-    private async callBridge(action: string, params: any): Promise<TRQuantResponse> {
-        if (this.useHttp) {
-            return this.callHttp(action, params);
-        } else {
-            return this.callSubprocess(action, params);
-        }
-    }
-
-    /**
-     * 通过HTTP调用
-     */
-    private async callHttp(action: string, params: any): Promise<TRQuantResponse> {
-        const config = vscode.workspace.getConfiguration('trquant');
-        const host = config.get<string>('serverHost') || '127.0.0.1';
-        const port = config.get<number>('serverPort') || 5000;
+    private async callBridge<T>(
+        action: string,
+        params: Record<string, any>
+    ): Promise<ApiResponse<T>> {
+        const startTime = Date.now();
+        
+        logger.debug(`调用Bridge: ${action}`, this.MODULE, { params });
 
         try {
-            const response = await axios.post(
-                `http://${host}:${port}/api/${action}`,
-                params,
-                { timeout: 30000 }
+            const response = await this.executeSubprocess(action, params);
+            const duration = Date.now() - startTime;
+            
+            logger.info(
+                `Bridge调用完成: ${action}`,
+                this.MODULE,
+                { duration: `${duration}ms`, ok: response.ok }
             );
-            return response.data;
-        } catch (error: any) {
-            return {
-                ok: false,
-                error: error.message || 'HTTP请求失败'
-            };
+
+            return response;
+        } catch (error) {
+            const duration = Date.now() - startTime;
+            logger.error(
+                `Bridge调用失败: ${action}`,
+                this.MODULE,
+                { duration: `${duration}ms`, error: error instanceof Error ? error.message : String(error) }
+            );
+            throw error;
         }
     }
 
     /**
-     * 通过子进程调用
+     * 通过子进程执行Bridge
      */
-    private async callSubprocess(action: string, params: any): Promise<TRQuantResponse> {
-        return new Promise((resolve) => {
-            const config = vscode.workspace.getConfiguration('trquant');
-            const pythonPath = config.get<string>('pythonPath') || 'python';
-            
-            // 获取bridge.py路径
-            const extensionPath = this.context.extensionPath;
-            const bridgePath = path.join(extensionPath, 'python', 'bridge.py');
+    private executeSubprocess<T>(
+        action: string,
+        params: Record<string, any>
+    ): Promise<ApiResponse<T>> {
+        return new Promise((resolve, reject) => {
+            const pythonPath = this.configManager.getPythonPath(this.extensionPath);
+            const bridgePath = path.join(this.extensionPath, 'python', 'bridge.py');
+            const timeout = this.configManager.get('timeout');
 
-            const request = JSON.stringify({
-                action,
-                params
+            const request: BridgeRequest = { action, params };
+            const requestStr = JSON.stringify(request);
+
+            logger.debug(`执行Python: ${pythonPath}`, this.MODULE, { bridgePath });
+
+            // 设置环境变量
+            const env = {
+                ...process.env,
+                PYTHONIOENCODING: 'utf-8',
+                TRQUANT_ROOT: path.dirname(this.extensionPath),
+                PYTHONPATH: path.join(this.extensionPath, 'python')
+            };
+
+            const proc = cp.spawn(pythonPath, [bridgePath], {
+                cwd: path.join(this.extensionPath, 'python'),
+                env,
+                stdio: ['pipe', 'pipe', 'pipe']
             });
 
-            try {
-                const process = cp.spawn(pythonPath, [bridgePath], {
-                    cwd: path.dirname(extensionPath),
-                    env: { ...process.env, PYTHONIOENCODING: 'utf-8' }
-                });
+            let stdout = '';
+            let stderr = '';
 
-                let stdout = '';
-                let stderr = '';
+            proc.stdout?.on('data', (data: Buffer) => {
+                stdout += data.toString();
+            });
 
-                process.stdout?.on('data', (data) => {
-                    stdout += data.toString();
-                });
+            proc.stderr?.on('data', (data: Buffer) => {
+                stderr += data.toString();
+            });
 
-                process.stderr?.on('data', (data) => {
-                    stderr += data.toString();
-                });
+            // 超时处理
+            const timeoutId = setTimeout(() => {
+                proc.kill('SIGTERM');
+                reject(new TRQuantError(
+                    ErrorCode.TIMEOUT,
+                    `操作超时 (${timeout}ms)`,
+                    { action }
+                ));
+            }, timeout);
 
-                process.on('close', (code) => {
-                    if (code !== 0) {
-                        resolve({
-                            ok: false,
-                            error: stderr || `进程退出码: ${code}`
-                        });
-                        return;
-                    }
+            proc.on('close', (code: number | null) => {
+                clearTimeout(timeoutId);
 
-                    try {
-                        const response = JSON.parse(stdout);
-                        resolve(response);
-                    } catch (e) {
-                        resolve({
-                            ok: false,
-                            error: `解析响应失败: ${stdout}`
-                        });
-                    }
-                });
+                if (code !== 0) {
+                    logger.error(`Python进程退出: ${code}`, this.MODULE, { stderr });
+                    reject(new PythonError(
+                        stderr || `进程退出码: ${code}`,
+                        { action, code, stderr }
+                    ));
+                    return;
+                }
 
-                process.on('error', (error) => {
-                    resolve({
-                        ok: false,
-                        error: `启动进程失败: ${error.message}`
-                    });
-                });
+                try {
+                    // 尝试解析JSON响应
+                    const response = JSON.parse(stdout.trim());
+                    resolve(response);
+                } catch (parseError) {
+                    logger.error('响应解析失败', this.MODULE, { stdout });
+                    reject(new TRQuantError(
+                        ErrorCode.BRIDGE_RESPONSE_PARSE_ERROR,
+                        '无法解析后端响应',
+                        { stdout, parseError: parseError instanceof Error ? parseError.message : String(parseError) }
+                    ));
+                }
+            });
 
-                // 发送请求
-                process.stdin?.write(request);
-                process.stdin?.end();
+            proc.on('error', (error: Error) => {
+                clearTimeout(timeoutId);
+                logger.error('进程启动失败', this.MODULE, { error: error.message });
+                
+                if (error.message.includes('ENOENT')) {
+                    reject(new TRQuantError(
+                        ErrorCode.PYTHON_NOT_FOUND,
+                        `Python解释器未找到: ${pythonPath}`,
+                        { pythonPath }
+                    ));
+                } else {
+                    reject(new PythonError(error.message, { error }));
+                }
+            });
 
-                // 超时处理
-                setTimeout(() => {
-                    process.kill();
-                    resolve({
-                        ok: false,
-                        error: '请求超时'
-                    });
-                }, 60000);
-
-            } catch (error: any) {
-                resolve({
-                    ok: false,
-                    error: error.message
-                });
-            }
+            // 发送请求
+            proc.stdin?.write(requestStr);
+            proc.stdin?.end();
         });
     }
 
-    dispose() {
-        if (this.bridgeProcess) {
-            this.bridgeProcess.kill();
-        }
+    /**
+     * 获取今日日期
+     */
+    private getTodayDate(): string {
+        return new Date().toISOString().split('T')[0];
+    }
+
+    /**
+     * 释放资源
+     */
+    dispose(): void {
+        logger.info('TRQuantClient已释放', this.MODULE);
     }
 }
-

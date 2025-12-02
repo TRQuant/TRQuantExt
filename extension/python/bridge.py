@@ -328,6 +328,18 @@ def adjust_positions(context, selected):
     }
 
 
+def health_check(params: dict) -> dict:
+    """健康检查"""
+    return {
+        'ok': True,
+        'data': {
+            'status': 'healthy',
+            'trquant_available': TRQUANT_AVAILABLE,
+            'timestamp': datetime.now().isoformat()
+        }
+    }
+
+
 # 动作分发
 ACTIONS = {
     'get_market_status': get_market_status,
@@ -335,7 +347,8 @@ ACTIONS = {
     'recommend_factors': recommend_factors,
     'generate_strategy': generate_strategy,
     'analyze_backtest': analyze_backtest,
-    'risk_assessment': risk_assessment
+    'risk_assessment': risk_assessment,
+    'health_check': health_check
 }
 
 
