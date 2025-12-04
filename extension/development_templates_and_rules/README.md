@@ -50,6 +50,13 @@
   - 结构化任务描述模板
   - **用途**：与AI协作时提供清晰的任务描述
 
+- **`CURSOR_BEST_PRACTICES.md`** - Cursor最佳实践 ⭐
+  - 基于深度研究的开发规则
+  - Token成本控制策略
+  - 上下文缓存机制
+  - 结构化提示模板
+  - **用途**：指导高效使用Cursor + Claude Opus 4.5
+
 ## 🚀 使用指南
 
 ### 对于开发者
@@ -57,7 +64,10 @@
 1. **新功能开发前**：阅读`PROJECT_BRIEF.md`和`MODULE_INDEX.md`了解架构
 2. **编码时**：遵循`ENGINEERING_RULES.md`中的规范
 3. **提交前**：使用`PR_CHECKLIST.md`逐项检查
-4. **与AI协作**：使用`TASK_TEMPLATE.md`编写任务描述
+4. **与AI协作**：
+   - 使用`TASK_TEMPLATE.md`编写任务描述
+   - 参考`CURSOR_BEST_PRACTICES.md`优化Token使用
+   - 使用上下文缓存避免重复分析
 
 ### 对于AI (Cursor)
 
@@ -75,7 +85,8 @@
 
 - 项目根目录：`/extension/`
 - 架构文档：`/extension/docs/`
-- 策略优化器文档：`/extension/docs/策略优化器学习引擎文档.md`
+- 策略优化器文档：`/extension/docs/07_workflow/策略优化器学习引擎文档.md`
+- Cursor最佳实践：`/extension/development_templates_and_rules/CURSOR_BEST_PRACTICES.md`
 
 ---
 
