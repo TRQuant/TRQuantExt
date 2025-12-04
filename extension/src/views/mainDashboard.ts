@@ -179,6 +179,11 @@ export class MainDashboard {
             case 'openFile':
                 await this.openFile(message.path);
                 break;
+            
+            // 策略优化
+            case 'optimizeStrategy':
+                vscode.commands.executeCommand('trquant.optimizeStrategy');
+                break;
         }
     }
 
@@ -1637,6 +1642,13 @@ export class MainDashboard {
                         <p>AI投资分析报告</p>
                     </div>
                 </div>
+                <div class="quick-card highlight" onclick="vscode.postMessage({command: 'optimizeStrategy'})">
+                    <div class="quick-icon">🔍</div>
+                    <div class="quick-info">
+                        <h4>策略优化</h4>
+                        <p>分析并优化策略代码</p>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -1814,6 +1826,13 @@ export class MainDashboard {
                     <div class="quick-info">
                         <h4>AI生成策略</h4>
                         <p>智能生成PTrade代码</p>
+                    </div>
+                </div>
+                <div class="quick-card highlight" onclick="vscode.postMessage({command: 'optimizeStrategy'})">
+                    <div class="quick-icon">🔍</div>
+                    <div class="quick-info">
+                        <h4>策略优化</h4>
+                        <p>分析并优化策略代码</p>
                     </div>
                 </div>
                 <div class="quick-card" onclick="vscode.postMessage({command: 'showLogs'})">

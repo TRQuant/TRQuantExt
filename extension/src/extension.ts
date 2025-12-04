@@ -47,6 +47,7 @@ import { registerMarketTrendPanel } from './views/marketTrendPanel';
 import { registerMainlinePanel } from './views/mainlinePanel';
 import { registerCandidatePoolPanel } from './views/candidatePoolPanel';
 import { registerFactorPanel } from './views/factorPanel';
+import { registerStrategyOptimizerPanel } from './views/strategyOptimizerPanel';
 
 // 工作流面板（独立GUI）- 现在在 registerCommands 中动态导入
 // 快捷操作（侧边栏）
@@ -353,6 +354,9 @@ def handle_data(context, data):
         registerFileManagerPanel(context, client);     // 文件管理
         registerKnowledgeBasePanel(context, client);   // 知识库
         registerSystemSettingsPanel(context, client);  // 系统设置
+        
+        // 注册策略优化器面板
+        registerStrategyOptimizerPanel(context);
         
         // 注册A股实操手册命令 - 参考桌面软件实现，直接启动Astro服务器
         context.subscriptions.push(
