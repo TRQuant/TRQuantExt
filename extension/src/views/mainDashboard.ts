@@ -1584,7 +1584,7 @@ export class MainDashboard {
             <button class="header-btn" onclick="vscode.postMessage({command: 'openSettings'})">
                 ⚙️ 设置
             </button>
-            <button class="header-btn primary" onclick="vscode.postMessage({command: 'openWorkflowPanel'})">
+            <button class="header-btn primary" onclick="openWorkflowPanel()">
                 ▶️ 打开工作流面板
             </button>
         </div>
@@ -1609,7 +1609,7 @@ export class MainDashboard {
                         <p>策略/报告/数据管理</p>
                     </div>
                 </div>
-                <div class="quick-card" onclick="vscode.postMessage({command: 'openWorkflowPanel'})">
+                <div class="quick-card" onclick="openWorkflowPanel()">
                     <div class="quick-icon">🔄</div>
                     <div class="quick-info">
                         <h4>工作流面板</h4>
